@@ -150,6 +150,13 @@ fn compress_sub_block(
         CompressionPath::PathA
     };
 
+    let (window_size, chain_limit) = match level {
+        0..=2 => (64 * 1024, 64),
+        3..=6 => (128 * 1024, 128),
+        _ => (256 * 1024, 256),
+    };
+    let lz77_encoder = Lz77Encoder::new(window_size).with_chain_limit(chain_limit);
+
     // Execute chosen path
     let (best_path, best_payload, best_flags) = match chosen_path {
         CompressionPath::PathB => {
@@ -170,7 +177,6 @@ fn compress_sub_block(
                 (CompressionPath::PathB, payload, b_flags)
             } else {
                 // Try Path A as fallback
-                let lz77_encoder = Lz77Encoder::default();
                 let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
                 let serialized = serialize_tokens(&tokens);
                 let a_encoded = rans_encoder.encode(&serialized);
@@ -186,7 +192,6 @@ fn compress_sub_block(
             }
         }
         CompressionPath::PathA => {
-            let lz77_encoder = Lz77Encoder::default();
             let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
             let serialized = serialize_tokens(&tokens);
             let rans_encoded = rans_encoder.encode(&serialized);
@@ -206,7 +211,6 @@ fn compress_sub_block(
             if payload.len() < orig_len {
                 (CompressionPath::PathC, payload, flags)
             } else {
-                let lz77_encoder = Lz77Encoder::default();
                 let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
                 let serialized = serialize_tokens(&tokens);
                 let a_encoded = rans_encoder.encode(&serialized);
@@ -226,7 +230,6 @@ fn compress_sub_block(
             if payload.len() < orig_len {
                 (CompressionPath::PathD, payload, flags)
             } else {
-                let lz77_encoder = Lz77Encoder::default();
                 let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
                 let serialized = serialize_tokens(&tokens);
                 let a_encoded = rans_encoder.encode(&serialized);

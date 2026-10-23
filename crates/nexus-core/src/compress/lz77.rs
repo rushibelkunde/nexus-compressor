@@ -11,8 +11,8 @@ use std::cmp;
 pub const DEFAULT_WINDOW_SIZE: usize = 32 * 1024;
 /// Minimum match length required for an LZ77 reference (3 bytes).
 pub const MIN_MATCH_LENGTH: usize = 3;
-/// Maximum match length in Phase 1 (258 bytes).
-pub const MAX_MATCH_LENGTH: usize = 258;
+/// Maximum match length (up to 65535 bytes).
+pub const MAX_MATCH_LENGTH: usize = 65535;
 /// Maximum hash-chain traversal depth for match search.
 pub const DEFAULT_CHAIN_LIMIT: usize = 64;
 /// Hash table entry count (must be power of two).
@@ -353,14 +353,57 @@ impl Lz77Decoder {
     }
 }
 
-/// Serializes LZ77 tokens into a compact byte vector.
+/// Serializes LZ77 tokens into a compact byte vector with run-length literal compression.
 pub fn serialize_tokens(tokens: &[Lz77Token]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(tokens.len() * 3);
-    for token in tokens {
-        match *token {
-            Lz77Token::Literal(b) => {
-                out.push(0x00);
-                out.push(b);
+    let mut out = Vec::with_capacity(tokens.len() * 2);
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i] {
+            Lz77Token::Literal(_) => {
+                let start = i;
+                while i < tokens.len() {
+                    if let Lz77Token::Literal(_) = tokens[i] {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let mut rem = i - start;
+                let mut idx = start;
+                while rem > 0 {
+                    if rem == 1 {
+                        if let Lz77Token::Literal(b) = tokens[idx] {
+                            out.push(0x00);
+                            out.push(b);
+                        }
+                        idx += 1;
+                        rem -= 1;
+                    } else if rem <= 113 {
+                        // Tag 0x10..=0x7F represents short literal run of (rem) bytes:
+                        // tag = 0x10 + (rem - 2)
+                        let tag = (0x10 + rem - 2) as u8;
+                        out.push(tag);
+                        for k in 0..rem {
+                            if let Lz77Token::Literal(b) = tokens[idx + k] {
+                                out.push(b);
+                            }
+                        }
+                        idx += rem;
+                        rem = 0;
+                    } else {
+                        // Long literal run up to 65535 bytes
+                        let chunk = cmp::min(rem, 65535);
+                        out.push(0x03);
+                        out.write_u16::<LittleEndian>(chunk as u16).unwrap();
+                        for k in 0..chunk {
+                            if let Lz77Token::Literal(b) = tokens[idx + k] {
+                                out.push(b);
+                            }
+                        }
+                        idx += chunk;
+                        rem -= chunk;
+                    }
+                }
             }
             Lz77Token::Match { offset, length } => {
                 if offset <= 0xFFFF {
@@ -372,6 +415,7 @@ pub fn serialize_tokens(tokens: &[Lz77Token]) -> Vec<u8> {
                     out.write_u32::<LittleEndian>(offset).unwrap();
                     out.write_u16::<LittleEndian>(length).unwrap();
                 }
+                i += 1;
             }
         }
     }
@@ -397,6 +441,30 @@ pub fn deserialize_tokens(mut bytes: &[u8]) -> Result<Vec<Lz77Token>> {
                 let offset = bytes.read_u32::<LittleEndian>()?;
                 let length = bytes.read_u16::<LittleEndian>()?;
                 tokens.push(Lz77Token::Match { offset, length });
+            }
+            0x03 => {
+                let count = bytes.read_u16::<LittleEndian>()? as usize;
+                if bytes.len() < count {
+                    return Err(NexusError::DataCorruption(
+                        "Truncated LZ77 literal run payload".into(),
+                    ));
+                }
+                for &b in &bytes[..count] {
+                    tokens.push(Lz77Token::Literal(b));
+                }
+                bytes = &bytes[count..];
+            }
+            0x10..=0x7F => {
+                let count = (tag - 0x10) as usize + 2;
+                if bytes.len() < count {
+                    return Err(NexusError::DataCorruption(
+                        "Truncated LZ77 short literal run payload".into(),
+                    ));
+                }
+                for &b in &bytes[..count] {
+                    tokens.push(Lz77Token::Literal(b));
+                }
+                bytes = &bytes[count..];
             }
             other => {
                 return Err(NexusError::DataCorruption(format!(
