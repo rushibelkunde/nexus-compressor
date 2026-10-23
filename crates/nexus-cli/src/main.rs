@@ -4,7 +4,7 @@
 //! verbose block inspection, and throughput metrics.
 
 use clap::{Parser, Subcommand};
-use nexus_core::pipeline::{compress, decompress, inspect_archive};
+use nexus_core::pipeline::{compress_file, decompress_file, inspect_archive_file};
 use std::fs;
 use std::path::PathBuf;
 use std::process;
@@ -76,15 +76,15 @@ fn main() {
             level,
         } => {
             let start = Instant::now();
-            let raw_data = match fs::read(&input) {
-                Ok(bytes) => bytes,
+            let metadata = match fs::metadata(&input) {
+                Ok(meta) => meta,
                 Err(err) => {
                     eprintln!("Error reading input file '{}': {}", input.display(), err);
                     process::exit(1);
                 }
             };
 
-            let original_size = raw_data.len();
+            let original_size = metadata.len();
             eprintln!(
                 "Compressing '{}' ({} bytes, level {})...",
                 input.display(),
@@ -92,19 +92,15 @@ fn main() {
                 level
             );
 
-            let compressed = match compress(&raw_data, level) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("Compression failed: {}", err);
-                    process::exit(1);
-                }
-            };
-
-            let compressed_size = compressed.len();
-            if let Err(err) = fs::write(&output, &compressed) {
-                eprintln!("Error writing output file '{}': {}", output.display(), err);
+            if let Err(err) = compress_file(&input, &output, level) {
+                eprintln!("Compression failed: {}", err);
                 process::exit(1);
             }
+
+            let compressed_size = match fs::metadata(&output) {
+                Ok(meta) => meta.len(),
+                Err(_) => 0,
+            };
 
             let elapsed = start.elapsed();
             let ratio = if original_size > 0 {
@@ -121,15 +117,15 @@ fn main() {
             );
 
             if cli.verbose {
-                if let Ok(info) = inspect_archive(&compressed) {
+                if let Ok(info) = inspect_archive_file(&output) {
                     print_archive_details(&info, &output);
                 }
             }
         }
         Commands::Decompress { input, output } => {
             let start = Instant::now();
-            let compressed = match fs::read(&input) {
-                Ok(bytes) => bytes,
+            let compressed_size = match fs::metadata(&input) {
+                Ok(meta) => meta.len(),
                 Err(err) => {
                     eprintln!("Error reading input file '{}': {}", input.display(), err);
                     process::exit(1);
@@ -139,28 +135,24 @@ fn main() {
             eprintln!(
                 "Decompressing '{}' ({} bytes)...",
                 input.display(),
-                compressed.len()
+                compressed_size
             );
 
             if cli.verbose {
-                if let Ok(info) = inspect_archive(&compressed) {
+                if let Ok(info) = inspect_archive_file(&input) {
                     print_archive_details(&info, &input);
                 }
             }
 
-            let restored = match decompress(&compressed) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("Decompression failed: {}", err);
-                    process::exit(1);
-                }
-            };
-
-            let restored_size = restored.len();
-            if let Err(err) = fs::write(&output, &restored) {
-                eprintln!("Error writing output file '{}': {}", output.display(), err);
+            if let Err(err) = decompress_file(&input, &output) {
+                eprintln!("Decompression failed: {}", err);
                 process::exit(1);
             }
+
+            let restored_size = match fs::metadata(&output) {
+                Ok(meta) => meta.len(),
+                Err(_) => 0,
+            };
 
             let elapsed = start.elapsed();
             let mb_per_sec =
@@ -171,23 +163,13 @@ fn main() {
                 elapsed, restored_size, mb_per_sec
             );
         }
-        Commands::List { input } => {
-            let compressed = match fs::read(&input) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("Error reading input file '{}': {}", input.display(), err);
-                    process::exit(1);
-                }
-            };
-
-            match inspect_archive(&compressed) {
-                Ok(info) => print_archive_details(&info, &input),
-                Err(err) => {
-                    eprintln!("Failed to inspect archive '{}': {}", input.display(), err);
-                    process::exit(1);
-                }
+        Commands::List { input } => match inspect_archive_file(&input) {
+            Ok(info) => print_archive_details(&info, &input),
+            Err(err) => {
+                eprintln!("Failed to inspect archive '{}': {}", input.display(), err);
+                process::exit(1);
             }
-        }
+        },
     }
 }
 

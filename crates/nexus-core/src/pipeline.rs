@@ -5,7 +5,9 @@
 //! and Layer 4 (.nxs container assembly).
 
 use crate::block::detector::detect_block_type;
-use crate::block::splitter::{split_into_superblocks, SubBlock, DEFAULT_SUPERBLOCK_SIZE};
+use crate::block::splitter::{
+    split_into_superblocks, split_superblock_into_subblocks, SubBlock, DEFAULT_SUPERBLOCK_SIZE,
+};
 use crate::compress::bwt::{bwt_decode, bwt_encode};
 use crate::compress::lz77::{
     deserialize_tokens, serialize_tokens, Lz77Decoder, Lz77Encoder, Lz77Token,
@@ -510,6 +512,265 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>> {
     Ok(decompressed)
 }
 
+/// Compresses an input file into an output .nxs file with bounded streaming memory.
+///
+/// Streams superblocks in batches (e.g. 16 superblocks = 16 MB) parallelized across
+/// Rayon worker threads. Memory consumption remains strictly bounded to ~32 MB
+/// regardless of file size.
+pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+    input_path: P,
+    output_path: Q,
+    level: u32,
+) -> Result<()> {
+    use std::fs::File;
+    use std::io::{BufReader, BufWriter, Read, Write};
+    use xxhash_rust::xxh64::Xxh64;
+
+    let mut input_file = BufReader::new(File::open(input_path.as_ref())?);
+    let original_size = input_file.get_ref().metadata()?.len();
+
+    let mut output_file = BufWriter::new(File::create(output_path.as_ref())?);
+    let mut file_hasher = Xxh64::new(0);
+
+    let sb_size = DEFAULT_SUPERBLOCK_SIZE;
+    let total_superblocks = if original_size == 0 {
+        1
+    } else {
+        original_size.div_ceil(sb_size as u64).max(1) as u32
+    };
+
+    let header = FileHeader::new(original_size, total_superblocks);
+    let mut header_buf = Vec::with_capacity(FILE_HEADER_SIZE);
+    header.write_to(&mut header_buf)?;
+    output_file.write_all(&header_buf)?;
+    file_hasher.update(&header_buf);
+
+    let mut block_table: Vec<BlockTableEntry> = Vec::new();
+    let mut current_offset = FILE_HEADER_SIZE as u64;
+    let mut sb_id = 0u32;
+
+    const BATCH_SUPERBLOCKS: usize = 16;
+
+    loop {
+        let mut batch_chunks: Vec<Vec<u8>> = Vec::with_capacity(BATCH_SUPERBLOCKS);
+        for _ in 0..BATCH_SUPERBLOCKS {
+            let mut chunk = vec![0u8; sb_size];
+            let mut read_bytes = 0;
+            while read_bytes < sb_size {
+                let n = input_file.read(&mut chunk[read_bytes..])?;
+                if n == 0 {
+                    break;
+                }
+                read_bytes += n;
+            }
+            if read_bytes > 0 {
+                chunk.truncate(read_bytes);
+                batch_chunks.push(chunk);
+            } else {
+                break;
+            }
+        }
+
+        if batch_chunks.is_empty() {
+            break;
+        }
+
+        let start_sb_id = sb_id;
+        sb_id += batch_chunks.len() as u32;
+
+        let compressed_batch: Vec<SuperblockResult> = batch_chunks
+            .into_par_iter()
+            .enumerate()
+            .map(|(idx, chunk)| {
+                let current_id = start_sb_id + idx as u32;
+                let sub_blocks = split_superblock_into_subblocks(&chunk);
+                let mut sub_block_results = Vec::with_capacity(sub_blocks.len());
+                let mut history = Vec::new();
+
+                for sub_block in &sub_blocks {
+                    let (mini_header, payload, preprocessed) =
+                        compress_sub_block(sub_block, level, &history);
+                    history.extend_from_slice(&preprocessed);
+                    sub_block_results.push((mini_header, payload));
+                }
+
+                (current_id, sub_block_results)
+            })
+            .collect();
+
+        for (cur_sb_id, blocks) in compressed_batch {
+            for (mini_header, payload) in blocks {
+                let file_offset = current_offset;
+                let mut mini_buf = Vec::with_capacity(MINI_HEADER_SIZE);
+                mini_header.write_to(&mut mini_buf)?;
+
+                output_file.write_all(&mini_buf)?;
+                file_hasher.update(&mini_buf);
+
+                output_file.write_all(&payload)?;
+                file_hasher.update(&payload);
+
+                current_offset += (mini_buf.len() + payload.len()) as u64;
+
+                block_table.push(BlockTableEntry {
+                    superblock_id: cur_sb_id,
+                    file_offset,
+                    compressed_size: payload.len() as u32,
+                    original_size: mini_header.original_size,
+                });
+            }
+        }
+    }
+
+    let block_table_offset = current_offset;
+    for entry in &block_table {
+        let mut entry_buf = Vec::with_capacity(20);
+        entry.write_to(&mut entry_buf)?;
+        output_file.write_all(&entry_buf)?;
+        file_hasher.update(&entry_buf);
+    }
+
+    let file_checksum = file_hasher.digest();
+    let footer = Footer::new(block_table_offset, block_table.len() as u32, file_checksum);
+    footer.write_to(&mut output_file)?;
+
+    output_file.flush()?;
+    Ok(())
+}
+
+/// Decompresses an input .nxs file into an output file with bounded streaming memory.
+pub fn decompress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+    input_path: P,
+    output_path: Q,
+) -> Result<()> {
+    use std::fs::File;
+    use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+    use xxhash_rust::xxh64::Xxh64;
+
+    let mut input_file = File::open(input_path.as_ref())?;
+    let file_len = input_file.metadata()?.len();
+
+    if file_len < (FILE_HEADER_SIZE + FOOTER_SIZE) as u64 {
+        return Err(NexusError::DataCorruption(
+            "Input file too small to contain valid .nxs header and footer".into(),
+        ));
+    }
+
+    // 1. Read and validate footer
+    input_file.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))?;
+    let mut footer_buf = [0u8; FOOTER_SIZE];
+    input_file.read_exact(&mut footer_buf)?;
+    let footer = Footer::read_from(&footer_buf[..])?;
+
+    // Verify full file checksum
+    input_file.seek(SeekFrom::Start(0))?;
+    let mut hasher = Xxh64::new(0);
+    let bytes_to_hash = file_len - FOOTER_SIZE as u64;
+    let mut hashed_bytes = 0u64;
+    let mut hash_buf = [0u8; 65536];
+
+    while hashed_bytes < bytes_to_hash {
+        let to_read = std::cmp::min(hash_buf.len() as u64, bytes_to_hash - hashed_bytes) as usize;
+        input_file.read_exact(&mut hash_buf[..to_read])?;
+        hasher.update(&hash_buf[..to_read]);
+        hashed_bytes += to_read as u64;
+    }
+
+    let computed_checksum = hasher.digest();
+    if computed_checksum != footer.file_checksum {
+        return Err(NexusError::ChecksumMismatch {
+            expected: footer.file_checksum,
+            actual: computed_checksum,
+        });
+    }
+
+    // 2. Read and validate file header
+    input_file.seek(SeekFrom::Start(0))?;
+    let mut header_buf = [0u8; FILE_HEADER_SIZE];
+    input_file.read_exact(&mut header_buf)?;
+    let header = FileHeader::read_from(&header_buf[..])?;
+
+    // 3. Read block table entries
+    input_file.seek(SeekFrom::Start(footer.block_table_offset))?;
+    let mut entries = Vec::with_capacity(footer.total_block_count as usize);
+    for _ in 0..footer.total_block_count {
+        let mut entry_buf = [0u8; 20];
+        input_file.read_exact(&mut entry_buf)?;
+        entries.push(BlockTableEntry::read_from(&entry_buf[..])?);
+    }
+
+    // Group block table entries by superblock_id
+    let mut superblock_entries: Vec<Vec<BlockTableEntry>> = Vec::new();
+    for entry in entries {
+        if superblock_entries.is_empty()
+            || superblock_entries.last().unwrap()[0].superblock_id != entry.superblock_id
+        {
+            superblock_entries.push(vec![entry]);
+        } else {
+            superblock_entries.last_mut().unwrap().push(entry);
+        }
+    }
+
+    // 4. Stream decompress superblock by superblock directly to output file
+    let mut output_file = BufWriter::new(File::create(output_path.as_ref())?);
+    let mut total_written: u64 = 0;
+
+    const DECOMP_BATCH: usize = 16;
+    for chunk_sb_entries in superblock_entries.chunks(DECOMP_BATCH) {
+        let mut batch_data: Vec<Vec<(SubBlockHeader, Vec<u8>)>> =
+            Vec::with_capacity(chunk_sb_entries.len());
+
+        for sb_entries in chunk_sb_entries {
+            let mut sb_blocks = Vec::with_capacity(sb_entries.len());
+            for entry in sb_entries {
+                input_file.seek(SeekFrom::Start(entry.file_offset))?;
+                let mut mini_buf = [0u8; MINI_HEADER_SIZE];
+                input_file.read_exact(&mut mini_buf)?;
+                let mini_header = SubBlockHeader::read_from(&mini_buf[..])?;
+
+                let mut payload = vec![0u8; mini_header.compressed_size as usize];
+                input_file.read_exact(&mut payload)?;
+                sb_blocks.push((mini_header, payload));
+            }
+            batch_data.push(sb_blocks);
+        }
+
+        let decompressed_batch: Result<Vec<Vec<u8>>> = batch_data
+            .into_par_iter()
+            .map(|sb_blocks| {
+                let mut sb_bytes = Vec::new();
+                let mut history = Vec::new();
+
+                for (mini_header, payload) in sb_blocks {
+                    let (raw, preprocessed) =
+                        decompress_sub_block(&mini_header, &payload, &history)?;
+                    history.extend_from_slice(&preprocessed);
+                    sb_bytes.extend_from_slice(&raw);
+                }
+
+                Ok(sb_bytes)
+            })
+            .collect();
+
+        let decompressed_batch = decompressed_batch?;
+        for sb_bytes in decompressed_batch {
+            output_file.write_all(&sb_bytes)?;
+            total_written += sb_bytes.len() as u64;
+        }
+    }
+
+    output_file.flush()?;
+
+    if total_written != header.original_size {
+        return Err(NexusError::DataCorruption(format!(
+            "Total restored size mismatch: header says {}, got {}",
+            header.original_size, total_written
+        )));
+    }
+
+    Ok(())
+}
+
 /// Information about an individual compressed block within an archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockInfo {
@@ -575,6 +836,77 @@ pub fn inspect_archive(compressed: &[u8]) -> Result<ArchiveInfo> {
 
         let mini_header =
             SubBlockHeader::read_from(&compressed[offset..offset + MINI_HEADER_SIZE])?;
+        total_original += entry.original_size as u64;
+        total_compressed += entry.compressed_size as u64;
+
+        blocks.push(BlockInfo {
+            superblock_id: entry.superblock_id,
+            file_offset: entry.file_offset,
+            compressed_size: entry.compressed_size,
+            original_size: entry.original_size,
+            block_type: mini_header.block_type,
+            compression_path: mini_header.compression_path,
+            preprocess_flags: mini_header.preprocess_flags,
+            block_checksum: mini_header.block_checksum,
+        });
+    }
+
+    Ok(ArchiveInfo {
+        format_version: header.format_version,
+        superblock_count: header.superblock_count,
+        total_blocks: footer.total_block_count,
+        total_original_size: total_original,
+        total_compressed_size: total_compressed,
+        file_checksum: footer.file_checksum,
+        blocks,
+    })
+}
+
+/// Inspects a .nxs archive directly from disk without decompressing payload blocks.
+pub fn inspect_archive_file<P: AsRef<std::path::Path>>(path: P) -> Result<ArchiveInfo> {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = File::open(path.as_ref())?;
+    let file_len = file.metadata()?.len();
+
+    if file_len < (FILE_HEADER_SIZE + FOOTER_SIZE) as u64 {
+        return Err(NexusError::DataCorruption(
+            "Input file too small to contain valid .nxs header and footer".into(),
+        ));
+    }
+
+    // Read footer
+    file.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))?;
+    let mut footer_buf = [0u8; FOOTER_SIZE];
+    file.read_exact(&mut footer_buf)?;
+    let footer = Footer::read_from(&footer_buf[..])?;
+
+    // Read header
+    file.seek(SeekFrom::Start(0))?;
+    let mut header_buf = [0u8; FILE_HEADER_SIZE];
+    file.read_exact(&mut header_buf)?;
+    let header = FileHeader::read_from(&header_buf[..])?;
+
+    // Read block table
+    file.seek(SeekFrom::Start(footer.block_table_offset))?;
+    let mut entries = Vec::with_capacity(footer.total_block_count as usize);
+    for _ in 0..footer.total_block_count {
+        let mut entry_buf = [0u8; 20];
+        file.read_exact(&mut entry_buf)?;
+        entries.push(BlockTableEntry::read_from(&entry_buf[..])?);
+    }
+
+    let mut blocks = Vec::with_capacity(entries.len());
+    let mut total_original: u64 = 0;
+    let mut total_compressed: u64 = 0;
+
+    for entry in entries {
+        file.seek(SeekFrom::Start(entry.file_offset))?;
+        let mut mini_buf = [0u8; MINI_HEADER_SIZE];
+        file.read_exact(&mut mini_buf)?;
+        let mini_header = SubBlockHeader::read_from(&mini_buf[..])?;
+
         total_original += entry.original_size as u64;
         total_compressed += entry.compressed_size as u64;
 
