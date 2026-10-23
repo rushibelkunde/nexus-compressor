@@ -152,7 +152,7 @@ fn compress_sub_block(
 
     let (window_size, chain_limit) = match level {
         0..=2 => (64 * 1024, 64),
-        3..=6 => (128 * 1024, 128),
+        3..=4 => (128 * 1024, 128),
         _ => (256 * 1024, 256),
     };
     let lz77_encoder = Lz77Encoder::new(window_size).with_chain_limit(chain_limit);

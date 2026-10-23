@@ -406,7 +406,19 @@ pub fn serialize_tokens(tokens: &[Lz77Token]) -> Vec<u8> {
                 }
             }
             Lz77Token::Match { offset, length } => {
-                if offset <= 0xFFFF {
+                if offset <= 0xFF && length <= 0xFF {
+                    out.push(0x05);
+                    out.push(offset as u8);
+                    out.push(length as u8);
+                } else if offset <= 0xFF {
+                    out.push(0x04);
+                    out.push(offset as u8);
+                    out.write_u16::<LittleEndian>(length).unwrap();
+                } else if offset <= 0xFFFF && length <= 0xFF {
+                    out.push(0x06);
+                    out.write_u16::<LittleEndian>(offset as u16).unwrap();
+                    out.push(length as u8);
+                } else if offset <= 0xFFFF {
                     out.push(0x01);
                     out.write_u16::<LittleEndian>(offset as u16).unwrap();
                     out.write_u16::<LittleEndian>(length).unwrap();
@@ -440,6 +452,21 @@ pub fn deserialize_tokens(mut bytes: &[u8]) -> Result<Vec<Lz77Token>> {
             0x02 => {
                 let offset = bytes.read_u32::<LittleEndian>()?;
                 let length = bytes.read_u16::<LittleEndian>()?;
+                tokens.push(Lz77Token::Match { offset, length });
+            }
+            0x04 => {
+                let offset = bytes.read_u8()? as u32;
+                let length = bytes.read_u16::<LittleEndian>()?;
+                tokens.push(Lz77Token::Match { offset, length });
+            }
+            0x05 => {
+                let offset = bytes.read_u8()? as u32;
+                let length = bytes.read_u8()? as u16;
+                tokens.push(Lz77Token::Match { offset, length });
+            }
+            0x06 => {
+                let offset = bytes.read_u16::<LittleEndian>()? as u32;
+                let length = bytes.read_u8()? as u16;
                 tokens.push(Lz77Token::Match { offset, length });
             }
             0x03 => {
