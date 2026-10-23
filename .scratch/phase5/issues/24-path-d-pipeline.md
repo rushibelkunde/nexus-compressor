@@ -9,9 +9,9 @@
 
 **Blocked by:** 23
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/neural/mod.rs`: `neural_compress` and `neural_decompress`
-- [ ] Wire `CompressionPath::PathD` into `pipeline.rs` for `compress_sub_block` and `decompress_sub_block`
-- [ ] Unit and integration tests for levels 17-19
-- [ ] Update `docs/PHASE_STATUS.md`
+- [x] `compress/neural/mod.rs`: `neural_compress` and `neural_decompress`
+- [x] Wire `CompressionPath::PathD` into `pipeline.rs` for `compress_sub_block` and `decompress_sub_block`
+- [x] Unit and integration tests for levels 17-19
+- [x] Update `docs/PHASE_STATUS.md`

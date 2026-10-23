@@ -8,8 +8,8 @@
 
 **Blocked by:** 21, 22
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/neural/mod.rs`: `NeuralPredictor` struct with `predict(&mut self)` and `update(&mut self, bit: u8)`
-- [ ] Connects `FeatureExtractor`, `DenseLayer`, and output projection
-- [ ] Unit tests testing learning of repeating and synthetic bit sequences
+- [x] `compress/neural/mod.rs`: `NeuralPredictor` struct with `predict(&mut self)` and `update(&mut self, bit: u8)`
+- [x] Connects `FeatureExtractor`, `DenseLayer`, and output projection
+- [x] Unit tests testing learning of repeating and synthetic bit sequences

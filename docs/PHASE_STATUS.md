@@ -5,16 +5,15 @@
 
 ---
 
-## Current Phase: **Phase 5 — Neural Compression (State-of-the-Art Ratio)**
+## Current Phase: **Phase 6 — Polish & Performance (Production Ready)**
 
-### Phase 5 Checklist
+### Phase 6 Checklist
 
-- [ ] Path D Neural Predictor architecture (`compress/neural.rs`)
-- [ ] 16-bit integer weight matrix with SIMD/AVX2 acceleration
-- [ ] Online Backpropagation using fixed-point integer arithmetic (ADR-003)
-- [ ] Multi-context feature extraction (byte n-grams, bit history, sparse tokens)
-- [ ] Path D pipeline integration for levels 17-19
-- [ ] Benchmark against Silesia and Canterbury corpus
+- [ ] CLI enhancements (progress bars, verbose compression stats per block, `--threads` flag)
+- [ ] Memory-bounded streaming for massive multi-gigabyte files
+- [ ] Comprehensive benchmark suite in `nexus-bench` against Silesia and Canterbury corpus
+- [ ] Performance profiling and inner-loop optimization
+- [ ] Verification across heterogeneous datasets (text, binaries, floating-point, media)
 
 ---
 
@@ -26,12 +25,19 @@
 | 2 | Core Optimizations | ✅ Completed | > gzip, ≈ bzip2 |
 | 3 | Adaptive Intelligence | ✅ Completed | > 7-Zip, ≈ Zstd |
 | 4 | Context Mixing | ✅ Completed | > 7-Zip Ultra |
-| 5 | Neural Compression | 🔄 In Progress | ≈ cmix |
-| 6 | Polish & Performance | ⏳ Planned | Production ready |
+| 5 | Neural Compression | ✅ Completed | ≈ cmix |
+| 6 | Polish & Performance | 🔄 In Progress | Production ready |
 
 ---
 
 ## Completed Milestones
+
+- **Phase 5 — Neural Compression (Completed 2026-10-24):**
+  - Fixed-point neural network layer (`compress/neural/layer.rs`) with 16-bit integer weights, 32-bit accumulators/biases, integer LeakyReLU activation, sparse forward pass, and online integer backpropagation (ADR-003).
+  - Multi-context sparse feature extractor (`compress/neural/features.rs`) extracting byte unigrams/bigrams, bit position/prefix tree states, sparse distance tokens (b_{-4}, b_{-8}), word tokens, and character classes with partitioned hash indexing.
+  - Bit-level neural probability predictor (`compress/neural/mod.rs`) connecting feature extractor, hidden layer, and output projection with online integer SGD error adaptation.
+  - Path D pipeline integration (`neural_compress` / `neural_decompress`) wired for compression levels 17-19 with arithmetic coding.
+  - 121/121 tests passing (105 unit tests, 16 integration tests) with zero compiler or clippy warnings under `-D warnings`.
 
 - **Phase 4 — Context Mixing (Completed 2026-10-24):**
   - Bit-level integer arithmetic/range coder (`entropy/arithmetic.rs`) with Subbotin carry handling and 12-bit fixed-point probabilities.

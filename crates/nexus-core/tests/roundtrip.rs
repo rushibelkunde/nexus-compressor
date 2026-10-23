@@ -183,3 +183,23 @@ fn test_integration_context_mixing_level_13() {
     let restored = decompress(&compressed).expect("decompression failed");
     assert_eq!(restored.as_slice(), input.as_slice());
 }
+
+#[test]
+fn test_integration_neural_level_17() {
+    let input = b"NEXUS Level 17 Neural Compression test with online integer backpropagation and fixed-point arithmetic coding!";
+    let compressed = compress(input, 17).expect("compression failed");
+    let restored = decompress(&compressed).expect("decompression failed");
+    assert_eq!(restored.as_slice(), input.as_slice());
+}
+
+#[test]
+fn test_integration_neural_level_18_repetitive() {
+    let base = b"Project NEXUS: Neural EXtreme Unified compresSion. ";
+    let mut input = Vec::new();
+    for _ in 0..50 {
+        input.extend_from_slice(base);
+    }
+    let compressed = compress(&input, 18).expect("compression failed");
+    let restored = decompress(&compressed).expect("decompression failed");
+    assert_eq!(restored, input);
+}

@@ -9,8 +9,8 @@
 
 **Blocked by:** Phase 4 complete
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/neural/layer.rs`: `DenseLayer` with fixed-point forward and backward pass
-- [ ] Clamping of weights to prevent integer overflow
-- [ ] Unit tests for forward computation, gradient descent convergence, and zero float math
+- [x] `compress/neural/layer.rs`: `DenseLayer` with fixed-point forward and backward pass
+- [x] Clamping of weights to prevent integer overflow
+- [x] Unit tests for forward computation, gradient descent convergence, and zero float math

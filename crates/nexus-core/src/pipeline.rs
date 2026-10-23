@@ -11,6 +11,7 @@ use crate::compress::lz77::{
     deserialize_tokens, serialize_tokens, Lz77Decoder, Lz77Encoder, Lz77Token,
 };
 use crate::compress::mixer::{context_mixing_compress, context_mixing_decompress};
+use crate::compress::neural::{neural_compress, neural_decompress};
 use crate::entropy::rans::{RansDecoder, RansEncoder};
 use crate::error::{NexusError, Result};
 use crate::format::{
@@ -127,7 +128,9 @@ fn compress_sub_block(
 
     // Layer 3: Algorithm selection
     let can_use_path_b = orig_len <= 131_072;
-    let chosen_path = if (13..=16).contains(&level) {
+    let chosen_path = if (17..=19).contains(&level) {
+        CompressionPath::PathD
+    } else if (13..=16).contains(&level) {
         CompressionPath::PathC
     } else if can_use_path_b {
         match block_type {
@@ -216,6 +219,26 @@ fn compress_sub_block(
                 }
             }
         }
+        CompressionPath::PathD => {
+            let payload = neural_compress(&preprocessed);
+            if payload.len() < orig_len {
+                (CompressionPath::PathD, payload, flags)
+            } else {
+                let lz77_encoder = Lz77Encoder::default();
+                let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
+                let serialized = serialize_tokens(&tokens);
+                let a_encoded = rans_encoder.encode(&serialized);
+                if a_encoded.len() < orig_len {
+                    (CompressionPath::PathA, a_encoded, flags)
+                } else {
+                    (
+                        CompressionPath::PathE,
+                        sub_block.data.clone(),
+                        PreprocessFlags::empty(),
+                    )
+                }
+            }
+        }
         _ => (
             CompressionPath::PathE,
             sub_block.data.clone(),
@@ -276,8 +299,8 @@ fn decompress_sub_block(
         CompressionPath::PathC => {
             context_mixing_decompress(payload, mini_header.original_size as usize)?
         }
+        CompressionPath::PathD => neural_decompress(payload, mini_header.original_size as usize)?,
         CompressionPath::PathE => payload.to_vec(),
-        other => return Err(NexusError::UnsupportedPath(other.to_u8())),
     };
 
     // Layer 2: Inverse Preprocessing
@@ -615,6 +638,22 @@ mod tests {
     fn test_pipeline_context_mixing_repetitive_level_14() {
         let input = b"The quick brown fox jumps over the lazy dog. ".repeat(10);
         let compressed = compress(&input, 14).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_pipeline_neural_level_17() {
+        let input = b"Extreme neural compression with fixed-point LeakyReLU and arithmetic coding in NEXUS!";
+        let compressed = compress(input, 17).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_pipeline_neural_repetitive_level_18() {
+        let input = b"The quick brown fox jumps over the lazy dog. ".repeat(10);
+        let compressed = compress(&input, 18).unwrap();
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(decompressed, input);
     }

@@ -11,8 +11,8 @@
 
 **Blocked by:** Phase 4 complete
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/neural/features.rs`: `FeatureExtractor` extracting context representations
-- [ ] Sparse hash indexing into embedding tables
-- [ ] Unit tests verifying distinct feature activations for different data contexts
+- [x] `compress/neural/features.rs`: `FeatureExtractor` extracting context representations
+- [x] Sparse hash indexing into embedding tables
+- [x] Unit tests verifying distinct feature activations for different data contexts
