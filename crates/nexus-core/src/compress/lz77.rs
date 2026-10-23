@@ -70,25 +70,148 @@ impl Lz77Encoder {
 
     /// Encodes input bytes into a vector of LZ77 tokens.
     pub fn encode(&self, input: &[u8]) -> Vec<Lz77Token> {
+        self.encode_with_history(input, &[])
+    }
+
+    /// Encodes input bytes with a warm sliding-window history from preceding sub-blocks.
+    pub fn encode_with_history(&self, input: &[u8], history: &[u8]) -> Vec<Lz77Token> {
         let len = input.len();
         if len == 0 {
             return Vec::new();
         }
 
+        if history.is_empty() {
+            let mut tokens = Vec::with_capacity(len / 2 + 16);
+            let mut head = vec![usize::MAX; HASH_TABLE_SIZE];
+            let mut prev = vec![usize::MAX; len];
+
+            let mut pos = 0;
+            while pos < len {
+                if pos + self.min_match > len {
+                    tokens.push(Lz77Token::Literal(input[pos]));
+                    pos += 1;
+                    continue;
+                }
+
+                let h = Self::hash3(input, pos);
+                let mut match_pos = head[h];
+                prev[pos] = match_pos;
+                head[h] = pos;
+
+                let mut best_len = 0;
+                let mut best_offset = 0;
+                let mut chain_depth = 0;
+
+                let window_start = pos.saturating_sub(self.window_size);
+
+                while match_pos != usize::MAX
+                    && match_pos >= window_start
+                    && chain_depth < self.chain_limit
+                {
+                    chain_depth += 1;
+                    let offset = pos - match_pos;
+                    let max_len = cmp::min(len - pos, self.max_match);
+
+                    if best_len >= self.min_match
+                        && (input[match_pos + best_len - 1] != input[pos + best_len - 1]
+                            || input[match_pos] != input[pos])
+                    {
+                        match_pos = prev[match_pos];
+                        continue;
+                    }
+
+                    let mut cur_len = 0;
+                    while cur_len < max_len && input[match_pos + cur_len] == input[pos + cur_len] {
+                        cur_len += 1;
+                    }
+
+                    if cur_len > best_len {
+                        best_len = cur_len;
+                        best_offset = offset;
+                        if best_len == max_len {
+                            break;
+                        }
+                    }
+
+                    match_pos = prev[match_pos];
+                }
+
+                if best_len >= self.min_match {
+                    tokens.push(Lz77Token::Match {
+                        offset: best_offset as u32,
+                        length: best_len as u16,
+                    });
+                    #[allow(clippy::needless_range_loop)]
+                    for i in (pos + 1)..(pos + best_len) {
+                        if i + self.min_match <= len {
+                            let hi = Self::hash3(input, i);
+                            prev[i] = head[hi];
+                            head[hi] = i;
+                        }
+                    }
+                    pos += best_len;
+                } else {
+                    tokens.push(Lz77Token::Literal(input[pos]));
+                    pos += 1;
+                }
+            }
+
+            return tokens;
+        }
+
+        // Warm history path
+        let hist = if history.len() > self.window_size {
+            &history[history.len() - self.window_size..]
+        } else {
+            history
+        };
+        let h_len = hist.len();
+        let total_len = h_len + len;
+
         let mut tokens = Vec::with_capacity(len / 2 + 16);
         let mut head = vec![usize::MAX; HASH_TABLE_SIZE];
-        let mut prev = vec![usize::MAX; len];
+        let mut prev = vec![usize::MAX; total_len];
 
-        let mut pos = 0;
-        while pos < len {
-            // If less than min_match remaining, emit literals
-            if pos + self.min_match > len {
-                tokens.push(Lz77Token::Literal(input[pos]));
+        // Pre-populate hash table with history window
+        if h_len >= self.min_match {
+            for i in 0..=(h_len - self.min_match) {
+                let b0 = hist[i] as usize;
+                let b1 = hist[i + 1] as usize;
+                let b2 = hist[i + 2] as usize;
+                let h = ((b0 << 10) ^ (b1 << 5) ^ b2) & HASH_MASK;
+                prev[i] = head[h];
+                head[h] = i;
+            }
+        }
+        if h_len >= 2 && len >= 1 {
+            let i = h_len - 2;
+            let b0 = hist[h_len - 2] as usize;
+            let b1 = hist[h_len - 1] as usize;
+            let b2 = input[0] as usize;
+            let h = ((b0 << 10) ^ (b1 << 5) ^ b2) & HASH_MASK;
+            prev[i] = head[h];
+            head[h] = i;
+        }
+        if h_len >= 1 && len >= 2 {
+            let i = h_len - 1;
+            let b0 = hist[h_len - 1] as usize;
+            let b1 = input[0] as usize;
+            let b2 = input[1] as usize;
+            let h = ((b0 << 10) ^ (b1 << 5) ^ b2) & HASH_MASK;
+            prev[i] = head[h];
+            head[h] = i;
+        }
+
+        let mut pos = h_len;
+        while pos < total_len {
+            let in_pos = pos - h_len;
+            if pos + self.min_match > total_len {
+                tokens.push(Lz77Token::Literal(input[in_pos]));
                 pos += 1;
                 continue;
             }
 
-            let h = Self::hash3(input, pos);
+            let h = Self::hash3(input, in_pos);
             let mut match_pos = head[h];
             prev[pos] = match_pos;
             head[h] = pos;
@@ -99,25 +222,33 @@ impl Lz77Encoder {
 
             let window_start = pos.saturating_sub(self.window_size);
 
+            let get_byte = |idx: usize| -> u8 {
+                if idx < h_len {
+                    hist[idx]
+                } else {
+                    input[idx - h_len]
+                }
+            };
+
             while match_pos != usize::MAX
                 && match_pos >= window_start
                 && chain_depth < self.chain_limit
             {
                 chain_depth += 1;
                 let offset = pos - match_pos;
-                let max_len = cmp::min(len - pos, self.max_match);
+                let max_len = cmp::min(total_len - pos, self.max_match);
 
-                // Check first and last bytes of current best match before looping
                 if best_len >= self.min_match
-                    && (input[match_pos + best_len - 1] != input[pos + best_len - 1]
-                        || input[match_pos] != input[pos])
+                    && (get_byte(match_pos + best_len - 1) != input[in_pos + best_len - 1]
+                        || get_byte(match_pos) != input[in_pos])
                 {
                     match_pos = prev[match_pos];
                     continue;
                 }
 
                 let mut cur_len = 0;
-                while cur_len < max_len && input[match_pos + cur_len] == input[pos + cur_len] {
+                while cur_len < max_len && get_byte(match_pos + cur_len) == input[in_pos + cur_len]
+                {
                     cur_len += 1;
                 }
 
@@ -137,18 +268,17 @@ impl Lz77Encoder {
                     offset: best_offset as u32,
                     length: best_len as u16,
                 });
-                // Insert skipped positions into hash chain
                 #[allow(clippy::needless_range_loop)]
                 for i in (pos + 1)..(pos + best_len) {
-                    if i + self.min_match <= len {
-                        let hi = Self::hash3(input, i);
+                    if i + self.min_match <= total_len {
+                        let hi = Self::hash3(input, i - h_len);
                         prev[i] = head[hi];
                         head[hi] = i;
                     }
                 }
                 pos += best_len;
             } else {
-                tokens.push(Lz77Token::Literal(input[pos]));
+                tokens.push(Lz77Token::Literal(input[in_pos]));
                 pos += 1;
             }
         }
@@ -168,7 +298,13 @@ impl Lz77Decoder {
 
     /// Decodes a slice of LZ77 tokens into reconstructed raw bytes.
     pub fn decode(&self, tokens: &[Lz77Token]) -> Result<Vec<u8>> {
+        self.decode_with_history(tokens, &[])
+    }
+
+    /// Decodes LZ77 tokens with warm history context from prior sub-blocks.
+    pub fn decode_with_history(&self, tokens: &[Lz77Token], history: &[u8]) -> Result<Vec<u8>> {
         let mut output = Vec::new();
+        let h_len = history.len();
 
         for token in tokens {
             match *token {
@@ -178,19 +314,36 @@ impl Lz77Decoder {
                 Lz77Token::Match { offset, length } => {
                     let offset = offset as usize;
                     let length = length as usize;
+                    let total_available = h_len + output.len();
 
-                    if offset == 0 || offset > output.len() {
+                    if offset == 0 || offset > total_available {
                         return Err(NexusError::DataCorruption(format!(
-                            "Invalid LZ77 match offset {} at output len {}",
+                            "Invalid LZ77 match offset {} at output len {} (total available: {})",
                             offset,
-                            output.len()
+                            output.len(),
+                            total_available
                         )));
                     }
 
-                    let start = output.len() - offset;
-                    for i in 0..length {
-                        let b = output[start + i];
-                        output.push(b);
+                    let idx = total_available - offset;
+                    if idx + length <= h_len {
+                        // Match lies entirely within previous history
+                        output.extend_from_slice(&history[idx..idx + length]);
+                    } else if idx >= h_len && offset >= length {
+                        // Match lies entirely within current sub-block without self-overlap
+                        let out_start = idx - h_len;
+                        output.extend_from_within(out_start..out_start + length);
+                    } else {
+                        // Overlapping match or crosses history-to-current boundary
+                        for _ in 0..length {
+                            let cur_idx = (h_len + output.len()) - offset;
+                            let b = if cur_idx < h_len {
+                                history[cur_idx]
+                            } else {
+                                output[cur_idx - h_len]
+                            };
+                            output.push(b);
+                        }
                     }
                 }
             }
@@ -349,5 +502,57 @@ mod tests {
         let serialized = serialize_tokens(&tokens);
         let deserialized = deserialize_tokens(&serialized).unwrap();
         assert_eq!(tokens, deserialized);
+    }
+
+    #[test]
+    fn test_lz77_warm_history_cross_block_match() {
+        let encoder = Lz77Encoder::default();
+        let decoder = Lz77Decoder::new();
+
+        let block1 = b"Hello, this is a test of the NEXUS warm dictionary architecture!";
+        let block2 = b"Another sentence with: NEXUS warm dictionary architecture!";
+
+        // Encode block1 without history
+        let tokens1 = encoder.encode(block1);
+        let dec1 = decoder.decode(&tokens1).unwrap();
+        assert_eq!(dec1, block1);
+
+        // Encode block2 with block1 as warm history
+        let tokens2 = encoder.encode_with_history(block2, block1);
+
+        // Verify that a match referencing block1 was found (e.g. offset > block2 position)
+        let has_cross_match = tokens2.iter().any(|t| match t {
+            Lz77Token::Match { length, .. } => *length >= 10,
+            _ => false,
+        });
+        assert!(has_cross_match, "Should have found long cross-block match");
+
+        // Decode block2 with block1 as history
+        let dec2 = decoder.decode_with_history(&tokens2, block1).unwrap();
+        assert_eq!(dec2, block2);
+    }
+
+    #[test]
+    fn test_lz77_warm_history_multi_block_sequence() {
+        let encoder = Lz77Encoder::default();
+        let decoder = Lz77Decoder::new();
+
+        let chunks = [
+            b"First block of data containing unique keywords: ALPHA BETA GAMMA.".as_slice(),
+            b"Second block repeating ALPHA BETA GAMMA and introducing DELTA EPSILON.".as_slice(),
+            b"Third block repeating DELTA EPSILON and ALPHA BETA GAMMA.".as_slice(),
+        ];
+
+        let mut history_enc = Vec::new();
+        let mut history_dec = Vec::new();
+
+        for chunk in &chunks {
+            let tokens = encoder.encode_with_history(chunk, &history_enc);
+            let restored = decoder.decode_with_history(&tokens, &history_dec).unwrap();
+            assert_eq!(&restored, chunk);
+
+            history_enc.extend_from_slice(chunk);
+            history_dec.extend_from_slice(&restored);
+        }
     }
 }

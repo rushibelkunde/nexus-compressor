@@ -1,28 +1,79 @@
 //! End-to-end compression and decompression pipeline.
 //!
 //! Integrates Layer 0 (framing & parallel superblocks), Layer 1 (data detection),
-//! Layer 2 (bijective MTF/RLE transforms), Layer 3 (Path A: LZ-ANS, Path B: BWT-ANS),
+//! Layer 2 (bijective MTF, RLE, Delta, x86 filter, Float Split), Layer 3 (Path A: LZ-ANS, Path B: BWT-ANS),
 //! and Layer 4 (.nxs container assembly).
 
 use crate::block::detector::detect_block_type;
 use crate::block::splitter::{split_into_superblocks, SubBlock, DEFAULT_SUPERBLOCK_SIZE};
 use crate::compress::bwt::{bwt_decode, bwt_encode};
-use crate::compress::lz77::{deserialize_tokens, serialize_tokens, Lz77Decoder, Lz77Encoder};
+use crate::compress::lz77::{
+    deserialize_tokens, serialize_tokens, Lz77Decoder, Lz77Encoder, Lz77Token,
+};
 use crate::entropy::rans::{RansDecoder, RansEncoder};
 use crate::error::{NexusError, Result};
 use crate::format::{
     BlockTableEntry, BlockType, CompressionPath, FileHeader, Footer, PreprocessFlags,
     SubBlockHeader, FILE_HEADER_SIZE, FOOTER_SIZE, MINI_HEADER_SIZE,
 };
+use crate::preprocess::delta::{delta_decode, delta_encode};
+use crate::preprocess::float_split::{float_split_decode, float_split_encode};
 use crate::preprocess::mtf::{mtf_decode, mtf_encode};
 use crate::preprocess::rle::{zero_rle_decode, zero_rle_encode};
+use crate::preprocess::x86::{x86_filter_decode, x86_filter_encode};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rayon::prelude::*;
 use xxhash_rust::xxh32::xxh32;
 use xxhash_rust::xxh64::xxh64;
 
-/// Compresses a single sub-block, choosing the best compression path.
-fn compress_sub_block(sub_block: &SubBlock, level: u32) -> (SubBlockHeader, Vec<u8>) {
+const PILOT_SAMPLE_SIZE: usize = 16 * 1024;
+
+/// Selects between Path A and Path B using a 16KB center pilot sample (ADR-005).
+pub fn pilot_sample_path(data: &[u8]) -> CompressionPath {
+    let sample = if data.len() <= PILOT_SAMPLE_SIZE {
+        data
+    } else {
+        let center = data.len() / 2;
+        let start = center.saturating_sub(PILOT_SAMPLE_SIZE / 2);
+        let end = std::cmp::min(start + PILOT_SAMPLE_SIZE, data.len());
+        &data[start..end]
+    };
+
+    // 1. Post-MTF zero-run density
+    let (bwt_sample, _) = bwt_encode(sample);
+    let mtf_sample = mtf_encode(&bwt_sample);
+    let zero_count = mtf_sample.iter().filter(|&&b| b == 0).count();
+    let zero_density = zero_count as f64 / mtf_sample.len() as f64;
+
+    // 2. LZ77 match ratio
+    let lz_encoder = Lz77Encoder::new(16 * 1024);
+    let tokens = lz_encoder.encode(sample);
+    let matched_bytes: usize = tokens
+        .iter()
+        .map(|t| match t {
+            Lz77Token::Match { length, .. } => *length as usize,
+            _ => 0,
+        })
+        .sum();
+    let match_ratio = matched_bytes as f64 / sample.len() as f64;
+
+    if zero_density > 0.40 && match_ratio <= 0.60 {
+        CompressionPath::PathB
+    } else if match_ratio > 0.60 && zero_density <= 0.40 {
+        CompressionPath::PathA
+    } else if zero_density > 0.35 {
+        CompressionPath::PathB
+    } else {
+        CompressionPath::PathA
+    }
+}
+
+/// Compresses a single sub-block, choosing the best preprocessing and compression path.
+fn compress_sub_block(
+    sub_block: &SubBlock,
+    level: u32,
+    history: &[u8],
+) -> (SubBlockHeader, Vec<u8>, Vec<u8>) {
     let block_checksum = xxh32(&sub_block.data, 0);
     let block_type = detect_block_type(&sub_block.data);
     let orig_len = sub_block.data.len();
@@ -36,70 +87,118 @@ fn compress_sub_block(sub_block: &SubBlock, level: u32) -> (SubBlockHeader, Vec<
             PreprocessFlags::empty(),
             block_checksum,
         );
-        return (mini_header, Vec::new());
+        return (mini_header, Vec::new(), Vec::new());
+    }
+
+    if block_type == BlockType::Incompressible {
+        let mini_header = SubBlockHeader::new(
+            orig_len as u32,
+            orig_len as u32,
+            block_type,
+            CompressionPath::PathE,
+            PreprocessFlags::empty(),
+            block_checksum,
+        );
+        return (mini_header, sub_block.data.clone(), sub_block.data.clone());
+    }
+
+    // Layer 2: Preprocessing
+    let mut preprocessed = sub_block.data.clone();
+    let mut flags = PreprocessFlags::empty();
+
+    match block_type {
+        BlockType::Executable => {
+            preprocessed = x86_filter_encode(&sub_block.data);
+            flags.insert(PreprocessFlags::X86_FILTER);
+        }
+        BlockType::FloatingPoint => {
+            preprocessed = float_split_encode(&sub_block.data, 4);
+            flags.insert(PreprocessFlags::FLOAT_SPLIT);
+        }
+        BlockType::Audio => {
+            preprocessed = delta_encode(&sub_block.data, 2);
+            flags.insert(PreprocessFlags::DELTA);
+        }
+        _ => {}
     }
 
     let rans_encoder = RansEncoder::new();
 
-    // Strategy 1: Path B (BWT + MTF + Zero-RLE + rANS)
-    // Highly effective for natural language text, source code, and structured data (<= 128 KB)
-    let try_path_b =
-        (block_type == BlockType::Text || block_type == BlockType::SourceCode || level >= 7)
-            && orig_len <= 131_072;
-
-    let path_b_result: Option<(Vec<u8>, PreprocessFlags)> = if try_path_b {
-        let (bwt_bytes, primary_index) = bwt_encode(&sub_block.data);
-        let mtf_bytes = mtf_encode(&bwt_bytes);
-        let rle_bytes = zero_rle_encode(&mtf_bytes);
-        let rans_encoded = rans_encoder.encode(&rle_bytes);
-
-        let mut payload = Vec::with_capacity(rans_encoded.len() + 4);
-        payload.write_u32::<LittleEndian>(primary_index).unwrap();
-        payload.extend_from_slice(&rans_encoded);
-
-        let mut flags = PreprocessFlags::empty();
-        flags.insert(PreprocessFlags::MTF);
-        flags.insert(PreprocessFlags::RLE);
-        Some((payload, flags))
+    // Layer 3: Algorithm selection
+    let can_use_path_b = orig_len <= 131_072;
+    let chosen_path = if can_use_path_b {
+        match block_type {
+            BlockType::Text | BlockType::SourceCode => {
+                if level <= 6 {
+                    CompressionPath::PathB
+                } else {
+                    pilot_sample_path(&preprocessed)
+                }
+            }
+            BlockType::StructuredData if level >= 7 => pilot_sample_path(&preprocessed),
+            _ => CompressionPath::PathA,
+        }
     } else {
-        None
+        CompressionPath::PathA
     };
 
-    // Strategy 2: Path A (LZ77 + rANS)
-    let try_path_a = !try_path_b || level >= 7 || block_type == BlockType::Binary;
+    // Execute chosen path
+    let (best_path, best_payload, best_flags) = match chosen_path {
+        CompressionPath::PathB => {
+            let (bwt_bytes, primary_index) = bwt_encode(&preprocessed);
+            let mtf_bytes = mtf_encode(&bwt_bytes);
+            let rle_bytes = zero_rle_encode(&mtf_bytes);
+            let rans_encoded = rans_encoder.encode(&rle_bytes);
 
-    let path_a_result: Option<Vec<u8>> = if try_path_a || path_b_result.is_none() {
-        let lz77_encoder = Lz77Encoder::default();
-        let tokens = lz77_encoder.encode(&sub_block.data);
-        let serialized = serialize_tokens(&tokens);
-        let rans_encoded = rans_encoder.encode(&serialized);
-        Some(rans_encoded)
-    } else {
-        None
+            let mut payload = Vec::with_capacity(rans_encoded.len() + 4);
+            payload.write_u32::<LittleEndian>(primary_index).unwrap();
+            payload.extend_from_slice(&rans_encoded);
+
+            let mut b_flags = flags;
+            b_flags.insert(PreprocessFlags::MTF);
+            b_flags.insert(PreprocessFlags::RLE);
+
+            if payload.len() < orig_len {
+                (CompressionPath::PathB, payload, b_flags)
+            } else {
+                // Try Path A as fallback
+                let lz77_encoder = Lz77Encoder::default();
+                let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
+                let serialized = serialize_tokens(&tokens);
+                let a_encoded = rans_encoder.encode(&serialized);
+                if a_encoded.len() < orig_len {
+                    (CompressionPath::PathA, a_encoded, flags)
+                } else {
+                    (
+                        CompressionPath::PathE,
+                        sub_block.data.clone(),
+                        PreprocessFlags::empty(),
+                    )
+                }
+            }
+        }
+        CompressionPath::PathA => {
+            let lz77_encoder = Lz77Encoder::default();
+            let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
+            let serialized = serialize_tokens(&tokens);
+            let rans_encoded = rans_encoder.encode(&serialized);
+
+            if rans_encoded.len() < orig_len {
+                (CompressionPath::PathA, rans_encoded, flags)
+            } else {
+                (
+                    CompressionPath::PathE,
+                    sub_block.data.clone(),
+                    PreprocessFlags::empty(),
+                )
+            }
+        }
+        _ => (
+            CompressionPath::PathE,
+            sub_block.data.clone(),
+            PreprocessFlags::empty(),
+        ),
     };
-
-    // Select the path that yields the smallest payload
-    let mut best_path = CompressionPath::PathE;
-    let mut best_payload = sub_block.data.clone();
-    let mut best_flags = PreprocessFlags::empty();
-    let mut best_len = orig_len;
-
-    if let Some((payload, flags)) = path_b_result {
-        if payload.len() < best_len {
-            best_len = payload.len();
-            best_path = CompressionPath::PathB;
-            best_payload = payload;
-            best_flags = flags;
-        }
-    }
-
-    if let Some(payload) = path_a_result {
-        if payload.len() < best_len {
-            best_path = CompressionPath::PathA;
-            best_payload = payload;
-            best_flags = PreprocessFlags::empty();
-        }
-    }
 
     let mini_header = SubBlockHeader::new(
         best_payload.len() as u32,
@@ -110,15 +209,29 @@ fn compress_sub_block(sub_block: &SubBlock, level: u32) -> (SubBlockHeader, Vec<
         block_checksum,
     );
 
-    (mini_header, best_payload)
+    let history_bytes = if best_path == CompressionPath::PathE {
+        sub_block.data.clone()
+    } else {
+        preprocessed
+    };
+
+    (mini_header, best_payload, history_bytes)
 }
 
-/// Decompresses a single sub-block given its mini-header and compressed payload.
-fn decompress_sub_block(mini_header: &SubBlockHeader, payload: &[u8]) -> Result<Vec<u8>> {
+/// Decompresses a single sub-block given its mini-header, compressed payload, and warm LZ77 history.
+fn decompress_sub_block(
+    mini_header: &SubBlockHeader,
+    payload: &[u8],
+    history: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    if mini_header.original_size == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
     let rans_decoder = RansDecoder::new();
     let lz77_decoder = Lz77Decoder::new();
 
-    let sub_block_bytes = match mini_header.compression_path {
+    let preprocessed = match mini_header.compression_path {
         CompressionPath::PathB => {
             if payload.len() < 4 {
                 return Err(NexusError::DataCorruption(
@@ -135,14 +248,28 @@ fn decompress_sub_block(mini_header: &SubBlockHeader, payload: &[u8]) -> Result<
         CompressionPath::PathA => {
             let serialized_tokens = rans_decoder.decode(payload)?;
             let tokens = deserialize_tokens(&serialized_tokens)?;
-            lz77_decoder.decode(&tokens)?
+            lz77_decoder.decode_with_history(&tokens, history)?
         }
         CompressionPath::PathE => payload.to_vec(),
         other => return Err(NexusError::UnsupportedPath(other.to_u8())),
     };
 
+    // Layer 2: Inverse Preprocessing
+    let mut raw_bytes = preprocessed.clone();
+    let flags = mini_header.preprocess_flags;
+
+    if flags.contains(PreprocessFlags::FLOAT_SPLIT) {
+        raw_bytes = float_split_decode(&raw_bytes, 4);
+    }
+    if flags.contains(PreprocessFlags::DELTA) {
+        raw_bytes = delta_decode(&raw_bytes, 2);
+    }
+    if flags.contains(PreprocessFlags::X86_FILTER) {
+        raw_bytes = x86_filter_decode(&raw_bytes);
+    }
+
     // Verify sub-block checksum
-    let computed_checksum = xxh32(&sub_block_bytes, 0);
+    let computed_checksum = xxh32(&raw_bytes, 0);
     if computed_checksum != mini_header.block_checksum {
         return Err(NexusError::BlockChecksumMismatch {
             expected: mini_header.block_checksum,
@@ -150,13 +277,13 @@ fn decompress_sub_block(mini_header: &SubBlockHeader, payload: &[u8]) -> Result<
         });
     }
 
-    if sub_block_bytes.len() != mini_header.original_size as usize {
+    if raw_bytes.len() != mini_header.original_size as usize {
         return Err(NexusError::DataCorruption(
             "Sub-block uncompressed size does not match mini-header original size".into(),
         ));
     }
 
-    Ok(sub_block_bytes)
+    Ok((raw_bytes, preprocessed))
 }
 
 type CompressedBlock = (SubBlockHeader, Vec<u8>);
@@ -178,17 +305,22 @@ pub fn compress(input: &[u8], level: u32) -> Result<Vec<u8>> {
     header.write_to(&mut output)?;
 
     // 2. Parallel compression of superblocks via Rayon
-    let compressed_superblocks: Vec<SuperblockResult> = superblocks
+    let mut compressed_superblocks: Vec<SuperblockResult> = superblocks
         .into_par_iter()
         .map(|sb| {
-            let compressed_blocks = sb
-                .sub_blocks
-                .iter()
-                .map(|sub_block| compress_sub_block(sub_block, level))
-                .collect();
+            let mut history = Vec::new();
+            let mut compressed_blocks = Vec::with_capacity(sb.sub_blocks.len());
+            for sub_block in &sb.sub_blocks {
+                let (mini_header, payload, preprocessed) =
+                    compress_sub_block(sub_block, level, &history);
+                history.extend_from_slice(&preprocessed);
+                compressed_blocks.push((mini_header, payload));
+            }
             (sb.id, compressed_blocks)
         })
         .collect();
+
+    compressed_superblocks.sort_by_key(|sb| sb.0);
 
     // 3. Sequential container assembly
     let mut block_table = Vec::new();
@@ -225,7 +357,7 @@ pub fn compress(input: &[u8], level: u32) -> Result<Vec<u8>> {
 
 /// Decompresses a .nxs byte stream back into original raw bytes.
 ///
-/// Validates footer, headers, checksums, and decodes sub-blocks.
+/// Validates footer, headers, checksums, and decodes sub-blocks in parallel across superblocks.
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>> {
     if compressed.len() < FILE_HEADER_SIZE + FOOTER_SIZE {
         return Err(NexusError::DataCorruption(
@@ -263,37 +395,59 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>> {
         entries.push(BlockTableEntry::read_from(&mut table_cursor)?);
     }
 
-    // 4. Parallel sub-block decompression using Rayon
-    let decompressed_blocks: Result<Vec<Vec<u8>>> = entries
+    // Group block table entries by superblock_id
+    let mut superblock_entries: Vec<Vec<BlockTableEntry>> = Vec::new();
+    for entry in entries {
+        if superblock_entries.is_empty()
+            || superblock_entries.last().unwrap()[0].superblock_id != entry.superblock_id
+        {
+            superblock_entries.push(vec![entry]);
+        } else {
+            superblock_entries.last_mut().unwrap().push(entry);
+        }
+    }
+
+    // 4. Parallel superblock decompression using Rayon
+    let decompressed_superblocks: Result<Vec<Vec<u8>>> = superblock_entries
         .into_par_iter()
-        .map(|entry| {
-            let offset = entry.file_offset as usize;
-            if offset + MINI_HEADER_SIZE > compressed.len() {
-                return Err(NexusError::DataCorruption(
-                    "Block offset exceeds file boundary".into(),
-                ));
+        .map(|sb_entries| {
+            let mut sb_bytes = Vec::new();
+            let mut history = Vec::new();
+
+            for entry in sb_entries {
+                let offset = entry.file_offset as usize;
+                if offset + MINI_HEADER_SIZE > compressed.len() {
+                    return Err(NexusError::DataCorruption(
+                        "Block offset exceeds file boundary".into(),
+                    ));
+                }
+
+                let mini_header =
+                    SubBlockHeader::read_from(&compressed[offset..offset + MINI_HEADER_SIZE])?;
+                let payload_start = offset + MINI_HEADER_SIZE;
+                let payload_end = payload_start + mini_header.compressed_size as usize;
+
+                if payload_end > compressed.len() {
+                    return Err(NexusError::DataCorruption(
+                        "Payload boundary exceeds file size".into(),
+                    ));
+                }
+
+                let payload = &compressed[payload_start..payload_end];
+                let (raw_bytes, preprocessed) =
+                    decompress_sub_block(&mini_header, payload, &history)?;
+                history.extend_from_slice(&preprocessed);
+                sb_bytes.extend_from_slice(&raw_bytes);
             }
 
-            let mini_header =
-                SubBlockHeader::read_from(&compressed[offset..offset + MINI_HEADER_SIZE])?;
-            let payload_start = offset + MINI_HEADER_SIZE;
-            let payload_end = payload_start + mini_header.compressed_size as usize;
-
-            if payload_end > compressed.len() {
-                return Err(NexusError::DataCorruption(
-                    "Payload boundary exceeds file size".into(),
-                ));
-            }
-
-            let payload = &compressed[payload_start..payload_end];
-            decompress_sub_block(&mini_header, payload)
+            Ok(sb_bytes)
         })
         .collect();
 
-    let blocks = decompressed_blocks?;
+    let sb_results = decompressed_superblocks?;
     let mut decompressed = Vec::with_capacity(header.original_size as usize);
-    for block in blocks {
-        decompressed.extend_from_slice(&block);
+    for sb_data in sb_results {
+        decompressed.extend_from_slice(&sb_data);
     }
 
     if decompressed.len() as u64 != header.original_size {
@@ -368,5 +522,57 @@ mod tests {
         let compressed = compress(&input, 1).unwrap();
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_pipeline_executable_x86() {
+        let mut code = Vec::new();
+        code.extend_from_slice(b"\x7FELF\x02\x01\x01\x00"); // ELF header to trigger Executable
+        for i in 0..1000 {
+            code.push(0xE8); // CALL
+            let rel = (i * 16) as i32;
+            code.extend_from_slice(&rel.to_le_bytes());
+            code.push(0x90); // NOP
+        }
+
+        let compressed = compress(&code, 5).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, code);
+    }
+
+    #[test]
+    fn test_pipeline_floating_point() {
+        let mut floats = Vec::new();
+        for i in 0..2000 {
+            let val = (i as f32) * 1.5;
+            floats.extend_from_slice(&val.to_le_bytes());
+        }
+
+        let compressed = compress(&floats, 5).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, floats);
+    }
+
+    #[test]
+    fn test_pipeline_audio_pcm() {
+        let mut audio = Vec::new();
+        audio.extend_from_slice(b"RIFF");
+        audio.extend_from_slice(&[0u8; 4]);
+        audio.extend_from_slice(b"WAVE");
+        for i in 0..2000 {
+            let sample = ((i as f64 * 0.1).sin() * 10000.0) as i16;
+            audio.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let compressed = compress(&audio, 5).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, audio);
+    }
+
+    #[test]
+    fn test_pipeline_pilot_sampling() {
+        let text = b"Text that benefits strongly from Burrows-Wheeler Transform and Move-to-Front clustering. ".repeat(200);
+        let path = pilot_sample_path(&text);
+        assert_eq!(path, CompressionPath::PathB);
     }
 }

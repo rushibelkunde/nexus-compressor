@@ -5,23 +5,18 @@
 
 ---
 
-## Current Phase: **Phase 2 — Core Optimizations**
+## Current Phase: **Phase 4 — Context Mixing (The Core Advantage)**
 
-### Phase 2 Checklist
+### Phase 4 Checklist
 
-- [x] rANS entropy coder (`entropy/rans.rs`)
-- [x] Burrows-Wheeler Transform (`compress/bwt.rs`)
-- [x] Move-to-Front transform (`preprocess/mtf.rs`)
-- [x] Zero-Run-Length encoding (`preprocess/rle.rs`)
-- [x] PATH B (BWT + MTF + Zero-RLE + rANS) end-to-end
-- [x] Upgrade PATH A with rANS coder
-- [x] Dynamic path routing (Path B for text/code, Path A for binary)
-- [x] Parallel superblock compression via `rayon`
-- [x] Comprehensive roundtrip tests and benchmarks
-
-### Phase 2 Goal
-Replace Huffman with rANS, implement BWT pipeline for text/code, parallelize superblocks via Rayon.
-**Status: COMPLETED** (All 61 unit + integration tests passing, verified across text & binary).
+- [ ] Bitwise rANS / Arithmetic Coder (12-bit fixed-point probabilities)
+- [ ] Context Models: Order-0, Order-1, Order-2, Match Model
+- [ ] Word-level model for natural text
+- [ ] Record-model for structured / tabular binary
+- [ ] Integer logistic mixer with precomputed stretch/squash lookup tables
+- [ ] Fixed-point gradient descent weight adapter (ADR-003)
+- [ ] Path C integration into `pipeline.rs` for Levels 13-16
+- [ ] Verification on Silesia / Calgary corpora
 
 ---
 
@@ -31,14 +26,25 @@ Replace Huffman with rANS, implement BWT pipeline for text/code, parallelize sup
 |-------|------|--------|-------------|
 | 1 | Foundation | ✅ Completed | ≈ gzip |
 | 2 | Core Optimizations | ✅ Completed | > gzip, ≈ bzip2 |
-| 3 | Adaptive Intelligence | 🔄 Next Up | > 7-Zip, ≈ Zstd |
-| 4 | Context Mixing | ⏳ Planned | > 7-Zip Ultra |
+| 3 | Adaptive Intelligence | ✅ Completed | > 7-Zip, ≈ Zstd |
+| 4 | Context Mixing | 🔄 In Progress | > 7-Zip Ultra |
 | 5 | Neural Compression | ⏳ Planned | ≈ cmix |
 | 6 | Polish & Performance | ⏳ Planned | Production ready |
 
 ---
 
 ## Completed Milestones
+
+- **Phase 3 — Adaptive Intelligence (Completed 2026-10-24):**
+  - Bijective Delta encoding (`preprocess/delta.rs`) supporting generic, audio, and sensor strides.
+  - IEEE 754 Float byte-plane splitting (`preprocess/float_split.rs`) with tail alignment handling.
+  - Bijective x86 BCJ branch filter (`preprocess/x86.rs`) with relative-to-absolute CALL/JMP translations.
+  - Statistical content detector & classifier (`block/detector.rs`) supporting PE, ELF, Mach-O, WAV, IEEE 754 floats, and entropy categorization.
+  - Dynamic entropy-based sub-block boundary splitting (`block/splitter.rs`) across 16KB-512KB windows.
+  - Warm LZ77 dictionary preserved across sub-block boundaries within independent superblocks (ADR-001).
+  - 16KB center pilot sampling for intelligent path routing (ADR-005).
+  - Chained Layer 2 preprocessing and inverse preprocessing in `pipeline.rs`.
+  - 90/90 tests passing (77 unit tests, 13 integration tests) with zero compiler or clippy warnings.
 
 - **Phase 2 — Core Optimizations (Completed 2026-10-23):**
   - Order-0 rANS entropy coder with 12-bit precision, fast lookup tables, and normalized symbol frequencies.
