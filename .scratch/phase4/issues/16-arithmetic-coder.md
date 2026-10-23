@@ -9,9 +9,9 @@
 
 **Blocked by:** Phase 3 complete
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `entropy/arithmetic.rs`: `ArithmeticEncoder` with `encode_bit(&mut self, bit: u8, p1: u16, output: &mut Vec<u8>)`
-- [ ] `entropy/arithmetic.rs`: `ArithmeticDecoder` with `decode_bit(&mut self, p1: u16, input: &mut &[u8]) -> u8`
-- [ ] Renormalization and flush on encoder finish
-- [ ] Unit tests for uniform bits, skewed probabilities, edge cases (all zeros, all ones, alternating)
+- [x] `entropy/arithmetic.rs`: `ArithmeticEncoder` with `encode_bit(&mut self, bit: u8, p1: u16, output: &mut Vec<u8>)`
+- [x] `entropy/arithmetic.rs`: `ArithmeticDecoder` with `decode_bit(&mut self, p1: u16) -> u8`
+- [x] Renormalization and flush on encoder finish
+- [x] Unit tests for uniform bits, skewed probabilities, edge cases (all zeros, all ones, alternating)

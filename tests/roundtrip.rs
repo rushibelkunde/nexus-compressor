@@ -175,3 +175,11 @@ fn test_integration_dynamic_subblocks_mixed() {
     let restored = decompress(&compressed).expect("decompression failed");
     assert_eq!(restored, composite);
 }
+
+#[test]
+fn test_integration_context_mixing_level_13() {
+    let input = b"NEXUS Level 13 Context Mixing test with neural probability blending and arithmetic range coder!";
+    let compressed = compress(input, 13).expect("compression failed");
+    let restored = decompress(&compressed).expect("decompression failed");
+    assert_eq!(restored.as_slice(), input.as_slice());
+}

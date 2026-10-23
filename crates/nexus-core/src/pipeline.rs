@@ -10,6 +10,7 @@ use crate::compress::bwt::{bwt_decode, bwt_encode};
 use crate::compress::lz77::{
     deserialize_tokens, serialize_tokens, Lz77Decoder, Lz77Encoder, Lz77Token,
 };
+use crate::compress::mixer::{context_mixing_compress, context_mixing_decompress};
 use crate::entropy::rans::{RansDecoder, RansEncoder};
 use crate::error::{NexusError, Result};
 use crate::format::{
@@ -126,7 +127,9 @@ fn compress_sub_block(
 
     // Layer 3: Algorithm selection
     let can_use_path_b = orig_len <= 131_072;
-    let chosen_path = if can_use_path_b {
+    let chosen_path = if (13..=16).contains(&level) {
+        CompressionPath::PathC
+    } else if can_use_path_b {
         match block_type {
             BlockType::Text | BlockType::SourceCode => {
                 if level <= 6 {
@@ -193,6 +196,26 @@ fn compress_sub_block(
                 )
             }
         }
+        CompressionPath::PathC => {
+            let payload = context_mixing_compress(&preprocessed);
+            if payload.len() < orig_len {
+                (CompressionPath::PathC, payload, flags)
+            } else {
+                let lz77_encoder = Lz77Encoder::default();
+                let tokens = lz77_encoder.encode_with_history(&preprocessed, history);
+                let serialized = serialize_tokens(&tokens);
+                let a_encoded = rans_encoder.encode(&serialized);
+                if a_encoded.len() < orig_len {
+                    (CompressionPath::PathA, a_encoded, flags)
+                } else {
+                    (
+                        CompressionPath::PathE,
+                        sub_block.data.clone(),
+                        PreprocessFlags::empty(),
+                    )
+                }
+            }
+        }
         _ => (
             CompressionPath::PathE,
             sub_block.data.clone(),
@@ -249,6 +272,9 @@ fn decompress_sub_block(
             let serialized_tokens = rans_decoder.decode(payload)?;
             let tokens = deserialize_tokens(&serialized_tokens)?;
             lz77_decoder.decode_with_history(&tokens, history)?
+        }
+        CompressionPath::PathC => {
+            context_mixing_decompress(payload, mini_header.original_size as usize)?
         }
         CompressionPath::PathE => payload.to_vec(),
         other => return Err(NexusError::UnsupportedPath(other.to_u8())),
@@ -574,5 +600,22 @@ mod tests {
         let text = b"Text that benefits strongly from Burrows-Wheeler Transform and Move-to-Front clustering. ".repeat(200);
         let path = pilot_sample_path(&text);
         assert_eq!(path, CompressionPath::PathB);
+    }
+
+    #[test]
+    fn test_pipeline_context_mixing_level_13() {
+        let input =
+            b"Extreme compression powered by Context Mixing and Arithmetic Coding in NEXUS!";
+        let compressed = compress(input, 13).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_pipeline_context_mixing_repetitive_level_14() {
+        let input = b"The quick brown fox jumps over the lazy dog. ".repeat(10);
+        let compressed = compress(&input, 14).unwrap();
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, input);
     }
 }

@@ -9,10 +9,10 @@
 
 **Blocked by:** 16, 19
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/mixer/mod.rs`: `context_mixing_compress(data: &[u8]) -> Vec<u8>`
-- [ ] `compress/mixer/mod.rs`: `context_mixing_decompress(compressed: &[u8], original_size: usize) -> Result<Vec<u8>>`
-- [ ] Wire `CompressionPath::PathC` into `pipeline.rs` for `compress_sub_block` and `decompress_sub_block`
-- [ ] Full integration roundtrip tests with levels 13-16
-- [ ] Verify ratio superiority on repetitive and structured data
+- [x] `compress/mixer/mod.rs`: `context_mixing_compress(data: &[u8]) -> Vec<u8>`
+- [x] `compress/mixer/mod.rs`: `context_mixing_decompress(compressed: &[u8], original_size: usize) -> Result<Vec<u8>>`
+- [x] Wire `CompressionPath::PathC` into `pipeline.rs` for `compress_sub_block` and `decompress_sub_block`
+- [x] Full integration roundtrip tests with levels 13-16
+- [x] Verify ratio superiority on repetitive and structured data

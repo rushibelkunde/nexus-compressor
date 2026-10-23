@@ -13,10 +13,10 @@
 
 **Blocked by:** 16, 17
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/mixer/models.rs`: `ContextModel` trait and context state struct
-- [ ] `Order0Model`, `Order1Model`, `Order2Model`
-- [ ] `MatchModel` with rolling buffer lookup
-- [ ] `WordModel` with simple fast hashing
-- [ ] Unit tests for each model verifying probability shifts toward observed bits
+- [x] `compress/mixer/models.rs`: `ContextModel` trait and context state struct
+- [x] `Order0Model`, `Order1Model`, `Order2Model`
+- [x] `MatchModel` with rolling buffer lookup
+- [x] `WordModel` with simple fast hashing
+- [x] Unit tests for each model verifying probability shifts toward observed bits

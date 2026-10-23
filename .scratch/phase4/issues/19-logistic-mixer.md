@@ -11,9 +11,9 @@
 
 **Blocked by:** 17, 18
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/mixer/mod.rs`: `LogisticMixer` struct holding models and integer weights
-- [ ] Forward pass: `predict(&self, ctx: &Context) -> u16`
-- [ ] Backward pass: `update(&mut self, ctx: &Context, bit: u8)`
-- [ ] Roundtrip tests verifying bit-by-bit encode and decode stay 100% synchronized
+- [x] `compress/mixer/mod.rs`: `LogisticMixer` struct holding models and integer weights
+- [x] Forward pass: `predict(&mut self, ctx: &ContextState) -> u16`
+- [x] Backward pass: `update(&mut self, ctx: &ContextState, bit: u8)`
+- [x] Roundtrip tests verifying bit-by-bit encode and decode stay 100% synchronized

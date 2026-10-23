@@ -8,8 +8,8 @@
 
 **Blocked by:** Phase 3 complete
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `compress/mixer/tables.rs`: Precomputed `STRETCH_TABLE` and `SQUASH_TABLE`
-- [ ] Fixed-point conversion helpers `stretch(p: u16) -> i32` and `squash(x: i32) -> u16`
-- [ ] Inversion accuracy unit tests verifying `squash(stretch(p)) ≈ p` within integer precision
+- [x] `compress/mixer/tables.rs`: Precomputed `STRETCH_TABLE` and `SQUASH_TABLE`
+- [x] Fixed-point conversion helpers `stretch(p: u16) -> i32` and `squash(x: i32) -> u16`
+- [x] Inversion accuracy unit tests verifying `squash(stretch(p)) ≈ p` within integer precision
