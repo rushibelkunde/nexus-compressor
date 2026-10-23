@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 nexus-core = { path = "../nexus-core" }
 clap = { version = "4.5", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
+rayon = "1.10"

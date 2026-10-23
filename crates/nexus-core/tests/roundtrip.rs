@@ -1,7 +1,7 @@
 //! End-to-end integration roundtrip tests for Project NEXUS.
 
 use nexus_core::error::NexusError;
-use nexus_core::pipeline::{compress, decompress};
+use nexus_core::pipeline::{compress, decompress, inspect_archive};
 
 #[test]
 fn test_integration_empty() {
@@ -70,6 +70,33 @@ fn test_integration_multi_superblock() {
     let compressed = compress(&input, 1).expect("compression failed");
     let restored = decompress(&compressed).expect("decompression failed");
     assert_eq!(restored, input);
+}
+
+#[test]
+fn test_integration_large_streaming_stream() {
+    let mut input = Vec::with_capacity(4_500_000);
+    let chunk_text = b"Adaptive Multi-Strategy Lossless Compression with Project NEXUS. ";
+    let chunk_binary = [0xAA, 0x55, 0x00, 0xFF, 0x12, 0x34, 0x56, 0x78];
+
+    while input.len() < 4_500_000 {
+        for _ in 0..100 {
+            input.extend_from_slice(chunk_text);
+        }
+        for _ in 0..100 {
+            input.extend_from_slice(&chunk_binary);
+        }
+    }
+
+    let compressed = compress(&input, 1).expect("compression failed");
+    let restored = decompress(&compressed).expect("decompression failed");
+    assert_eq!(restored, input);
+
+    let info = inspect_archive(&compressed).expect("inspect failed");
+    assert!(
+        info.superblock_count >= 5,
+        "Expected >= 5 superblocks, got {}",
+        info.superblock_count
+    );
 }
 
 #[test]

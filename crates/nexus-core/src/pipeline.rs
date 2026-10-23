@@ -510,9 +510,113 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>> {
     Ok(decompressed)
 }
 
+/// Information about an individual compressed block within an archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockInfo {
+    pub superblock_id: u32,
+    pub file_offset: u64,
+    pub compressed_size: u32,
+    pub original_size: u32,
+    pub block_type: BlockType,
+    pub compression_path: CompressionPath,
+    pub preprocess_flags: PreprocessFlags,
+    pub block_checksum: u32,
+}
+
+/// Metadata and block inventory for a .nxs archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveInfo {
+    pub format_version: u16,
+    pub superblock_count: u32,
+    pub total_blocks: u32,
+    pub total_original_size: u64,
+    pub total_compressed_size: u64,
+    pub file_checksum: u64,
+    pub blocks: Vec<BlockInfo>,
+}
+
+/// Inspects a .nxs archive without decompressing payload blocks.
+pub fn inspect_archive(compressed: &[u8]) -> Result<ArchiveInfo> {
+    if compressed.len() < FILE_HEADER_SIZE + FOOTER_SIZE {
+        return Err(NexusError::DataCorruption(
+            "Input too short to contain valid .nxs header and footer".into(),
+        ));
+    }
+
+    let footer_start = compressed.len() - FOOTER_SIZE;
+    let footer = Footer::read_from(&compressed[footer_start..])?;
+
+    let header = FileHeader::read_from(&compressed[..FILE_HEADER_SIZE])?;
+
+    let table_start = footer.block_table_offset as usize;
+    if table_start > footer_start {
+        return Err(NexusError::DataCorruption(
+            "Block table offset exceeds footer position".into(),
+        ));
+    }
+
+    let mut table_cursor = &compressed[table_start..footer_start];
+    let mut entries = Vec::with_capacity(footer.total_block_count as usize);
+    for _ in 0..footer.total_block_count {
+        entries.push(BlockTableEntry::read_from(&mut table_cursor)?);
+    }
+
+    let mut blocks = Vec::with_capacity(entries.len());
+    let mut total_original: u64 = 0;
+    let mut total_compressed: u64 = 0;
+
+    for entry in entries {
+        let offset = entry.file_offset as usize;
+        if offset + MINI_HEADER_SIZE > compressed.len() {
+            return Err(NexusError::DataCorruption(
+                "Block offset exceeds file boundary".into(),
+            ));
+        }
+
+        let mini_header =
+            SubBlockHeader::read_from(&compressed[offset..offset + MINI_HEADER_SIZE])?;
+        total_original += entry.original_size as u64;
+        total_compressed += entry.compressed_size as u64;
+
+        blocks.push(BlockInfo {
+            superblock_id: entry.superblock_id,
+            file_offset: entry.file_offset,
+            compressed_size: entry.compressed_size,
+            original_size: entry.original_size,
+            block_type: mini_header.block_type,
+            compression_path: mini_header.compression_path,
+            preprocess_flags: mini_header.preprocess_flags,
+            block_checksum: mini_header.block_checksum,
+        });
+    }
+
+    Ok(ArchiveInfo {
+        format_version: header.format_version,
+        superblock_count: header.superblock_count,
+        total_blocks: footer.total_block_count,
+        total_original_size: total_original,
+        total_compressed_size: total_compressed,
+        file_checksum: footer.file_checksum,
+        blocks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pipeline_inspect_archive() {
+        let input =
+            b"Inspection verification sample for Project NEXUS compression archive.".repeat(10);
+        let compressed = compress(&input, 5).unwrap();
+        let info = inspect_archive(&compressed).unwrap();
+
+        assert_eq!(info.format_version, 1);
+        assert_eq!(info.total_original_size, input.len() as u64);
+        assert_eq!(info.blocks.len(), info.total_blocks as usize);
+        assert!(!info.blocks.is_empty());
+    }
 
     #[test]
     fn test_pipeline_empty() {

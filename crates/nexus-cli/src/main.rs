@@ -1,8 +1,10 @@
 //! NEXUS Command-Line Interface.
 //!
-//! Provides `compress` and `decompress` subcommands for files.
+//! Provides `compress`, `decompress`, and `list` subcommands with multi-threading,
+//! verbose block inspection, and throughput metrics.
 
 use clap::{Parser, Subcommand};
+use nexus_core::pipeline::{compress, decompress, inspect_archive};
 use std::fs;
 use std::path::PathBuf;
 use std::process;
@@ -13,6 +15,14 @@ use std::time::Instant;
 #[command(about = "NEXUS: Neural EXtreme Unified compresSion", long_about = None)]
 #[command(version)]
 struct Cli {
+    /// Number of worker threads (default: logical CPU count)
+    #[arg(short = 't', long, global = true)]
+    threads: Option<usize>,
+
+    /// Enable verbose per-block telemetry and detailed statistics
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -36,10 +46,28 @@ enum Commands {
         /// Path to write decompressed output
         output: PathBuf,
     },
+    /// Inspects archive metadata and block table without decompressing
+    List {
+        /// Path to .nxs input file
+        input: PathBuf,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    // Configure Rayon global thread pool if specified
+    if let Some(num_threads) = cli.threads {
+        if let Err(err) = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+        {
+            eprintln!(
+                "Warning: Failed to set thread count to {}: {}",
+                num_threads, err
+            );
+        }
+    }
 
     match cli.command {
         Commands::Compress {
@@ -64,7 +92,7 @@ fn main() {
                 level
             );
 
-            let compressed = match nexus_core::pipeline::compress(&raw_data, level) {
+            let compressed = match compress(&raw_data, level) {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     eprintln!("Compression failed: {}", err);
@@ -91,6 +119,12 @@ fn main() {
                 "Done in {:.2?}. Compressed: {} bytes ({:.2}% of original), Throughput: {:.2} MB/s",
                 elapsed, compressed_size, ratio, mb_per_sec
             );
+
+            if cli.verbose {
+                if let Ok(info) = inspect_archive(&compressed) {
+                    print_archive_details(&info, &output);
+                }
+            }
         }
         Commands::Decompress { input, output } => {
             let start = Instant::now();
@@ -108,7 +142,13 @@ fn main() {
                 compressed.len()
             );
 
-            let restored = match nexus_core::pipeline::decompress(&compressed) {
+            if cli.verbose {
+                if let Ok(info) = inspect_archive(&compressed) {
+                    print_archive_details(&info, &input);
+                }
+            }
+
+            let restored = match decompress(&compressed) {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     eprintln!("Decompression failed: {}", err);
@@ -131,5 +171,79 @@ fn main() {
                 elapsed, restored_size, mb_per_sec
             );
         }
+        Commands::List { input } => {
+            let compressed = match fs::read(&input) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("Error reading input file '{}': {}", input.display(), err);
+                    process::exit(1);
+                }
+            };
+
+            match inspect_archive(&compressed) {
+                Ok(info) => print_archive_details(&info, &input),
+                Err(err) => {
+                    eprintln!("Failed to inspect archive '{}': {}", input.display(), err);
+                    process::exit(1);
+                }
+            }
+        }
     }
+}
+
+fn print_archive_details(info: &nexus_core::pipeline::ArchiveInfo, path: &std::path::Path) {
+    println!("================================================================================");
+    println!("NEXUS Archive Information: {}", path.display());
+    println!("Format Version    : {}", info.format_version);
+    println!("Superblock Count  : {}", info.superblock_count);
+    println!("Total Blocks      : {}", info.total_blocks);
+    println!(
+        "Original Size     : {} bytes ({:.2} KB)",
+        info.total_original_size,
+        info.total_original_size as f64 / 1024.0
+    );
+    println!(
+        "Compressed Size   : {} bytes ({:.2} KB)",
+        info.total_compressed_size,
+        info.total_compressed_size as f64 / 1024.0
+    );
+    let overall_ratio = if info.total_original_size > 0 {
+        (info.total_compressed_size as f64 / info.total_original_size as f64) * 100.0
+    } else {
+        100.0
+    };
+    println!(
+        "Ratio             : {:.2}% of original (saving {:.2}%)",
+        overall_ratio,
+        100.0 - overall_ratio
+    );
+    println!(
+        "File Checksum     : 0x{:016X} (XXHash64)",
+        info.file_checksum
+    );
+    println!("--------------------------------------------------------------------------------");
+    println!(
+        "{:<6} {:<6} {:<14} {:<8} {:<10} {:>10} {:>10} {:>8}",
+        "Block", "SB_ID", "Type", "Path", "Flags", "OrigBytes", "CompBytes", "Ratio"
+    );
+    println!("--------------------------------------------------------------------------------");
+    for (i, b) in info.blocks.iter().enumerate() {
+        let ratio = if b.original_size > 0 {
+            (b.compressed_size as f64 / b.original_size as f64) * 100.0
+        } else {
+            100.0
+        };
+        println!(
+            "{:<6} {:<6} {:<14?} {:<8?} {:<10?} {:>10} {:>10} {:>7.2}%",
+            i,
+            b.superblock_id,
+            b.block_type,
+            b.compression_path,
+            b.preprocess_flags,
+            b.original_size,
+            b.compressed_size,
+            ratio
+        );
+    }
+    println!("================================================================================");
 }
