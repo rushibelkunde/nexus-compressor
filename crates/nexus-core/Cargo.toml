@@ -10,3 +10,4 @@ license = "MIT OR Apache-2.0"
 thiserror = "2.0"
 byteorder = "1.5"
 xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
+rayon = "1.10"

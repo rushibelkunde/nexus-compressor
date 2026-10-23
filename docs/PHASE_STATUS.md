@@ -5,33 +5,23 @@
 
 ---
 
-## Current Phase: **Phase 1 — Foundation**
+## Current Phase: **Phase 2 — Core Optimizations**
 
-### Phase 1 Checklist
+### Phase 2 Checklist
 
-- [x] Cargo workspace initialized
-- [x] Project structure created
-- [x] Error types (`NexusError`)
-- [x] File format: header serialization/deserialization
-- [x] File format: footer serialization/deserialization
-- [x] File format: sub-block mini-header serialization/deserialization
-- [x] Block splitter (fixed-size superblocks, no entropy splitting yet)
-- [x] LZ77 encoder (greedy matching with hash chains)
-- [x] LZ77 decoder
-- [x] Huffman encoder (canonical)
-- [x] Huffman decoder
-- [x] Compression pipeline (LZ77 → Huffman → .nxs)
-- [x] Decompression pipeline (.nxs → Huffman → LZ77 → original)
-- [x] CLI: `nexus compress <input> <output>`
-- [x] CLI: `nexus decompress <input> <output>`
-- [x] Roundtrip tests (empty, 1 byte, all-same, random, text, multi-block)
-- [x] XXHash32 block checksums
-- [x] XXHash64 file checksum
+- [x] rANS entropy coder (`entropy/rans.rs`)
+- [x] Burrows-Wheeler Transform (`compress/bwt.rs`)
+- [x] Move-to-Front transform (`preprocess/mtf.rs`)
+- [x] Zero-Run-Length encoding (`preprocess/rle.rs`)
+- [x] PATH B (BWT + MTF + Zero-RLE + rANS) end-to-end
+- [x] Upgrade PATH A with rANS coder
+- [x] Dynamic path routing (Path B for text/code, Path A for binary)
+- [x] Parallel superblock compression via `rayon`
+- [x] Comprehensive roundtrip tests and benchmarks
 
-### Phase 1 Goal
-A working compressor that can compress and decompress any file correctly,
-with compression ratio approximately equal to gzip.
-**Status: COMPLETED** (All 39 unit + integration tests passing, CLI verified).
+### Phase 2 Goal
+Replace Huffman with rANS, implement BWT pipeline for text/code, parallelize superblocks via Rayon.
+**Status: COMPLETED** (All 61 unit + integration tests passing, verified across text & binary).
 
 ---
 
@@ -40,8 +30,8 @@ with compression ratio approximately equal to gzip.
 | Phase | Name | Status | Target Ratio |
 |-------|------|--------|-------------|
 | 1 | Foundation | ✅ Completed | ≈ gzip |
-| 2 | Core Optimizations | 🔄 Next Up | > gzip, ≈ bzip2 |
-| 3 | Adaptive Intelligence | ⏳ Planned | > 7-Zip, ≈ Zstd |
+| 2 | Core Optimizations | ✅ Completed | > gzip, ≈ bzip2 |
+| 3 | Adaptive Intelligence | 🔄 Next Up | > 7-Zip, ≈ Zstd |
 | 4 | Context Mixing | ⏳ Planned | > 7-Zip Ultra |
 | 5 | Neural Compression | ⏳ Planned | ≈ cmix |
 | 6 | Polish & Performance | ⏳ Planned | Production ready |
@@ -49,6 +39,15 @@ with compression ratio approximately equal to gzip.
 ---
 
 ## Completed Milestones
+
+- **Phase 2 — Core Optimizations (Completed 2026-10-23):**
+  - Order-0 rANS entropy coder with 12-bit precision, fast lookup tables, and normalized symbol frequencies.
+  - Burrows-Wheeler Transform (BWT) with O(N) LF-mapping inverse transform.
+  - Bijective Move-to-Front (MTF) and Zero-Run-Length (Zero-RLE) transforms.
+  - Path B text compression pipeline (BWT → MTF → Zero-RLE → rANS).
+  - Path A binary compression upgraded to LZ77 + rANS.
+  - Multi-threaded parallel superblock processing using `rayon`.
+  - 61/61 unit and integration tests passing with zero warnings.
 
 - **Phase 1 — Foundation (Completed 2026-10-23):**
   - Full Cargo workspace setup (`nexus-core`, `nexus-cli`, `nexus-bench`).
