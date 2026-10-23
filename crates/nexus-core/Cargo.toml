@@ -1,0 +1,12 @@
+[package]
+name = "nexus-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Project NEXUS Contributors"]
+description = "Core compression library for Project NEXUS"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+thiserror = "2.0"
+byteorder = "1.5"
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }

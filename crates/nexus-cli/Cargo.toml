@@ -1,0 +1,15 @@
+[package]
+name = "nexus-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Project NEXUS Contributors"]
+description = "Command-line interface for Project NEXUS compression"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[dependencies]
+nexus-core = { path = "../nexus-core" }
+clap = { version = "4.5", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
