@@ -3,12 +3,37 @@
 //! Provides `compress`, `decompress`, and `list` subcommands with multi-threading,
 //! verbose block inspection, and throughput metrics.
 
-use clap::{Parser, Subcommand};
-use nexus_core::pipeline::{compress_file, decompress_file, inspect_archive_file};
+use clap::{Parser, Subcommand, ValueEnum};
+use nexus_core::pipeline::{
+    compress_file_with_progress, decompress_file_with_progress, inspect_archive_file,
+    CompressionPreset, ProgressUpdate,
+};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
 use std::time::Instant;
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetArg {
+    /// Fast mode: Level 2, ~200+ MB/s, lower CPU usage
+    Low,
+    /// Balanced mode: Level 6, default general-purpose compression
+    Medium,
+    /// Maximum mode: Level 9, deep LZ match search & maximum space savings
+    High,
+}
+
+impl PresetArg {
+    pub fn to_preset(self) -> CompressionPreset {
+        match self {
+            Self::Low => CompressionPreset::Low,
+            Self::Medium => CompressionPreset::Medium,
+            Self::High => CompressionPreset::High,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "nexus")]
@@ -23,32 +48,39 @@ struct Cli {
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
 
+    /// Wait for keypress before exiting (recommended for File Explorer context menu)
+    #[arg(short = 'p', long, global = true)]
+    pause: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compresses a file using NEXUS
+    /// Compresses a file or folder into a NEXUS (.nxar) archive
     Compress {
-        /// Path to input file to compress
+        /// Path to input file or directory to compress
         input: PathBuf,
-        /// Path to output .nxs file
-        output: PathBuf,
-        /// Compression level (1-19, default: 1)
-        #[arg(short, long, default_value_t = 1)]
-        level: u32,
+        /// Path to output .nxar archive (defaults to <input>.nxar)
+        output: Option<PathBuf>,
+        /// Compression preset (low, medium, high - overrides numeric level)
+        #[arg(long, value_enum)]
+        preset: Option<PresetArg>,
+        /// Compression level (1-19, default: 6 if preset not specified)
+        #[arg(short, long)]
+        level: Option<u32>,
     },
-    /// Decompresses a .nxs file
+    /// Decompresses a .nxar archive (restoring file or directory)
     Decompress {
-        /// Path to .nxs input file
+        /// Path to .nxar or .nxs input archive
         input: PathBuf,
-        /// Path to write decompressed output
-        output: PathBuf,
+        /// Destination path for restored file or directory (defaults to archive base name)
+        output: Option<PathBuf>,
     },
     /// Inspects archive metadata and block table without decompressing
     List {
-        /// Path to .nxs input file
+        /// Path to .nxar or .nxs input archive
         input: PathBuf,
     },
 }
@@ -73,29 +105,80 @@ fn main() {
         Commands::Compress {
             input,
             output,
+            preset,
             level,
         } => {
             let start = Instant::now();
+            let effective_level = match (preset, level) {
+                (Some(p), _) => p.to_preset().to_level(),
+                (None, Some(l)) => l,
+                (None, None) => CompressionPreset::Medium.to_level(),
+            };
+
             let metadata = match fs::metadata(&input) {
                 Ok(meta) => meta,
                 Err(err) => {
-                    eprintln!("Error reading input file '{}': {}", input.display(), err);
-                    process::exit(1);
+                    exit_err(format!("Error reading input path '{}': {}", input.display(), err), cli.pause);
                 }
             };
 
-            let original_size = metadata.len();
-            eprintln!(
-                "Compressing '{}' ({} bytes, level {})...",
-                input.display(),
-                original_size,
-                level
-            );
+            let output = match output {
+                Some(p) => p,
+                None => {
+                    let mut p = input.clone();
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    p.set_file_name(format!("{}.nxar", name));
+                    p
+                }
+            };
 
-            if let Err(err) = compress_file(&input, &output, level) {
-                eprintln!("Compression failed: {}", err);
-                process::exit(1);
+            let original_size = if metadata.is_dir() {
+                let (manifest, _) = match nexus_core::vfs::crawl_directory(&input) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        exit_err(format!("Error scanning directory '{}': {}", input.display(), err), cli.pause);
+                    }
+                };
+                eprintln!(
+                    "Compressing folder '{}' ({} files, {} dirs, {} bytes, level {})...",
+                    input.display(),
+                    manifest.file_count(),
+                    manifest.directory_count(),
+                    manifest.total_uncompressed_bytes(),
+                    effective_level
+                );
+                manifest.total_uncompressed_bytes()
+            } else {
+                let size = metadata.len();
+                eprintln!(
+                    "Compressing '{}' ({} bytes, level {})...",
+                    input.display(),
+                    size,
+                    effective_level
+                );
+                size
+            };
+
+            let progress = Arc::new(|update: ProgressUpdate| {
+                eprint!(
+                    "\r\x1B[2K[+] {:<12} [{:>3.0}%] ({:.1} MB / {:.1} MB)",
+                    update.stage,
+                    update.fraction * 100.0,
+                    update.bytes_processed as f64 / (1024.0 * 1024.0),
+                    update.total_bytes as f64 / (1024.0 * 1024.0)
+                );
+                let _ = std::io::stderr().flush();
+            });
+
+            if let Err(err) = compress_file_with_progress(&input, &output, effective_level, Some(progress)) {
+                eprintln!();
+                exit_err(format!("Compression failed: {}", err), cli.pause);
             }
+            eprintln!();
 
             let compressed_size = match fs::metadata(&output) {
                 Ok(meta) => meta.len(),
@@ -112,8 +195,12 @@ fn main() {
                 (original_size as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64().max(0.000001);
 
             eprintln!(
-                "Done in {:.2?}. Compressed: {} bytes ({:.2}% of original), Throughput: {:.2} MB/s",
-                elapsed, compressed_size, ratio, mb_per_sec
+                "Done in {:.2?}. Output: '{}', Size: {} bytes ({:.2}% of original), Throughput: {:.2} MB/s",
+                elapsed,
+                output.display(),
+                compressed_size,
+                ratio,
+                mb_per_sec
             );
 
             if cli.verbose {
@@ -127,15 +214,30 @@ fn main() {
             let compressed_size = match fs::metadata(&input) {
                 Ok(meta) => meta.len(),
                 Err(err) => {
-                    eprintln!("Error reading input file '{}': {}", input.display(), err);
-                    process::exit(1);
+                    exit_err(format!("Error reading archive '{}': {}", input.display(), err), cli.pause);
+                }
+            };
+
+            let output = match output {
+                Some(p) => p,
+                None => {
+                    let file_name = input.file_name().unwrap_or_default().to_string_lossy();
+                    let stripped = if let Some(s) = file_name.strip_suffix(".nxar") {
+                        s
+                    } else if let Some(s) = file_name.strip_suffix(".nxs") {
+                        s
+                    } else {
+                        &file_name
+                    };
+                    input.with_file_name(stripped)
                 }
             };
 
             eprintln!(
-                "Decompressing '{}' ({} bytes)...",
+                "Decompressing '{}' ({} bytes) -> '{}'...",
                 input.display(),
-                compressed_size
+                compressed_size,
+                output.display()
             );
 
             if cli.verbose {
@@ -144,13 +246,32 @@ fn main() {
                 }
             }
 
-            if let Err(err) = decompress_file(&input, &output) {
-                eprintln!("Decompression failed: {}", err);
-                process::exit(1);
+            let progress = Arc::new(|update: ProgressUpdate| {
+                eprint!(
+                    "\r\x1B[2K[+] {:<12} [{:>3.0}%] ({:.1} MB / {:.1} MB)",
+                    update.stage,
+                    update.fraction * 100.0,
+                    update.bytes_processed as f64 / (1024.0 * 1024.0),
+                    update.total_bytes as f64 / (1024.0 * 1024.0)
+                );
+                let _ = std::io::stderr().flush();
+            });
+
+            if let Err(err) = decompress_file_with_progress(&input, &output, Some(progress)) {
+                eprintln!();
+                exit_err(format!("Decompression failed: {}", err), cli.pause);
             }
+            eprintln!();
 
             let restored_size = match fs::metadata(&output) {
-                Ok(meta) => meta.len(),
+                Ok(meta) => {
+                    if meta.is_dir() {
+                        let (m, _) = nexus_core::vfs::crawl_directory(&output).unwrap_or_default();
+                        m.total_uncompressed_bytes()
+                    } else {
+                        meta.len()
+                    }
+                }
                 Err(_) => 0,
             };
 
@@ -166,11 +287,26 @@ fn main() {
         Commands::List { input } => match inspect_archive_file(&input) {
             Ok(info) => print_archive_details(&info, &input),
             Err(err) => {
-                eprintln!("Failed to inspect archive '{}': {}", input.display(), err);
-                process::exit(1);
+                exit_err(format!("Failed to inspect archive '{}': {}", input.display(), err), cli.pause);
             }
         },
     }
+
+    if cli.pause {
+        eprintln!("\nPress Enter to exit...");
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+}
+
+fn exit_err(msg: impl std::fmt::Display, pause: bool) -> ! {
+    eprintln!("{}", msg);
+    if pause {
+        eprintln!("\nPress Enter to exit...");
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+    process::exit(1);
 }
 
 fn print_archive_details(info: &nexus_core::pipeline::ArchiveInfo, path: &std::path::Path) {

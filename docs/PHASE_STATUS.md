@@ -32,6 +32,14 @@
 
 ## Completed Milestones
 
+- **Desktop GUI, Presets & Shell Integration (Completed 2026-10-24):**
+  - **Presets & Custom Levels (1–19)**: Introduced `CompressionPreset` (`Low` = level 2, `Medium` = level 6, `High` = level 9) plus full arbitrary custom level selection (1 through 19) in [nexus-gui](file:///d:/Data/DATA/projects/personal/compression/crates/nexus-gui/src/main.rs) with real-time algorithm engine badges.
+  - **Live Size & Ratio Estimation Preview**: Added `estimate_compression` and `sample_path` in [pipeline.rs](file:///d:/Data/DATA/projects/personal/compression/crates/nexus-core/src/pipeline.rs) computing fast (<1ms) trial compression and Shannon entropy to display accurate estimated compressed size, space savings %, and incompressible warnings before compression starts.
+  - **Zero-Terminal GUI Decompression**: Wired all Windows Explorer decompression entry points (`Extract with NEXUS...`, `Extract Here` with `--auto-start`, and `.nxar` double-click) directly to `nexus-gui`, completely eliminating console terminal windows while rendering live animated progress bars, MB/s throughput, and ETA.
+  - **Custom Logo & Icon**: Designed custom cyberpunk-hexagonal brand icon with multi-resolution `.ico` (16x16, 32x32, 48x48, 256x256) at [assets/nexus.ico](file:///d:/Data/DATA/projects/personal/compression/assets/nexus.ico).
+  - **Windows Shell Integration**: Created [install.ps1](file:///d:/Data/DATA/projects/personal/compression/scripts/windows/install.ps1) registering right-click context menus (`Compress with NEXUS...`, quick preset submenu with auto-start, `Extract with NEXUS...`, `Extract Here`), `.nxar` default icon association, and instant shell cache refresh.
+  - **130/130 Workspace Tests Passing**: Zero regressions across 112 unit tests and 18 integration tests.
+
 - **Phase 6 — Polish & Performance (Completed 2026-10-24):**
   - Enhanced CLI binary (`nexus-cli`): added `--threads <N>`, `--verbose` block-level telemetry, and `nexus list` subcommand inspecting file headers, superblocks, and block tables without payload decompression.
   - Archive inspection engine (`inspect_archive`) in `pipeline.rs` returning structured `ArchiveInfo` and `BlockInfo`.

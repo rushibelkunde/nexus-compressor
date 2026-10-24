@@ -4,7 +4,7 @@
 //! Layer 2 (bijective MTF, RLE, Delta, x86 filter, Float Split), Layer 3 (Path A: LZ-ANS, Path B: BWT-ANS),
 //! and Layer 4 (.nxs container assembly).
 
-use crate::block::detector::detect_block_type;
+use crate::block::detector::{compute_shannon_entropy, detect_block_type};
 use crate::block::splitter::{
     split_into_superblocks, split_superblock_into_subblocks, SubBlock, DEFAULT_SUPERBLOCK_SIZE,
 };
@@ -29,6 +29,175 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rayon::prelude::*;
 use xxhash_rust::xxh32::xxh32;
 use xxhash_rust::xxh64::xxh64;
+
+/// Curated compression presets offering intuitive tradeoffs between speed and ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompressionPreset {
+    /// Fast mode: Level 2, ~200+ MB/s, lower CPU usage.
+    Low,
+    /// Balanced mode: Level 6, default general-purpose compression.
+    #[default]
+    Medium,
+    /// Maximum mode: Level 9, deep LZ match search & maximum space savings.
+    High,
+}
+
+impl CompressionPreset {
+    /// Maps preset to corresponding pipeline compression level.
+    pub fn to_level(self) -> u32 {
+        match self {
+            Self::Low => 2,
+            Self::Medium => 6,
+            Self::High => 9,
+        }
+    }
+}
+
+/// Real-time progress update event emitted during compression or decompression.
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    /// Bytes processed so far
+    pub bytes_processed: u64,
+    /// Total bytes expected
+    pub total_bytes: u64,
+    /// Name or relative path of current target item
+    pub current_target: String,
+    /// Current pipeline stage description
+    pub stage: &'static str,
+    /// Completion fraction between 0.0 and 1.0
+    pub fraction: f32,
+}
+
+/// Thread-safe callback hook for progress updates.
+pub type ProgressCallback = std::sync::Arc<dyn Fn(ProgressUpdate) + Send + Sync + 'static>;
+
+/// Estimated compression metrics based on fast sample analysis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompressionEstimate {
+    /// Approximate output size in bytes
+    pub estimated_bytes: u64,
+    /// Estimated compression ratio (compressed / original * 100.0)
+    pub ratio_percent: f64,
+    /// Estimated space savings percentage (100.0 - ratio)
+    pub savings_percent: f64,
+    /// Primary detected data type
+    pub detected_type: BlockType,
+    /// Whether data is deemed largely incompressible
+    pub is_incompressible: bool,
+}
+
+/// Computes a fast, lightweight compression estimate for an input of `total_bytes`
+/// using a representative `sample` (typically 16KB - 64KB) at a given `level` (1 to 19).
+pub fn estimate_compression(sample: &[u8], total_bytes: u64, level: u32) -> CompressionEstimate {
+    if sample.is_empty() || total_bytes == 0 {
+        return CompressionEstimate {
+            estimated_bytes: 0,
+            ratio_percent: 100.0,
+            savings_percent: 0.0,
+            detected_type: BlockType::Binary,
+            is_incompressible: false,
+        };
+    }
+
+    let detected_type = detect_block_type(sample);
+    let entropy = compute_shannon_entropy(sample);
+
+    if detected_type == BlockType::Incompressible || entropy >= 7.85 {
+        let est_bytes = (total_bytes as f64 * 0.995) as u64 + 64;
+        return CompressionEstimate {
+            estimated_bytes: est_bytes.min(total_bytes + 64),
+            ratio_percent: 99.5,
+            savings_percent: 0.5,
+            detected_type,
+            is_incompressible: true,
+        };
+    }
+
+    let slice_len = sample.len().min(32 * 1024);
+    let test_slice = &sample[..slice_len];
+
+    let dummy_subblock = SubBlock {
+        data: test_slice.to_vec(),
+    };
+    let test_level = level.min(9);
+    let (_, payload, _) = compress_sub_block(&dummy_subblock, test_level, &[]);
+
+    let mut base_ratio = if !test_slice.is_empty() {
+        payload.len() as f64 / test_slice.len() as f64
+    } else {
+        1.0
+    };
+    base_ratio = base_ratio.clamp(0.02, 1.0);
+
+    let scaled_ratio = match level {
+        1..=4 => (base_ratio * 1.02).min(1.0),
+        5..=9 => base_ratio,
+        10..=12 => base_ratio * 0.96,
+        13..=16 => base_ratio * 0.85,
+        17..=19 => base_ratio * 0.78,
+        _ => base_ratio,
+    }
+    .clamp(0.01, 1.0);
+
+    let frame_overhead = 64u64;
+    let est_bytes = ((total_bytes as f64 * scaled_ratio) as u64).saturating_add(frame_overhead);
+    let final_bytes = est_bytes.min(total_bytes);
+    let ratio_percent = if total_bytes > 0 {
+        (final_bytes as f64 / total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
+    let savings_percent = (100.0 - ratio_percent).max(0.0);
+
+    CompressionEstimate {
+        estimated_bytes: final_bytes,
+        ratio_percent,
+        savings_percent,
+        detected_type,
+        is_incompressible: false,
+    }
+}
+
+/// Reads a representative sample (up to `max_bytes`) and total size from a file or directory.
+pub fn sample_path<P: AsRef<std::path::Path>>(
+    path: P,
+    max_bytes: usize,
+) -> std::io::Result<(Vec<u8>, u64, bool)> {
+    use std::fs::File;
+    use std::io::Read;
+
+    let p = path.as_ref();
+    if p.is_dir() {
+        let (manifest, _) = crate::vfs::crawl_directory(p)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let total_size = manifest.total_uncompressed_bytes();
+        let mut sample_buf = Vec::with_capacity(max_bytes);
+        for entry in &manifest.entries {
+            if sample_buf.len() >= max_bytes {
+                break;
+            }
+            let full_path = p.join(&entry.path);
+            if full_path.is_file() {
+                if let Ok(mut f) = File::open(&full_path) {
+                    let to_read = max_bytes - sample_buf.len();
+                    let mut chunk = vec![0u8; to_read.min(entry.file_size as usize)];
+                    if let Ok(n) = f.read(&mut chunk) {
+                        chunk.truncate(n);
+                        sample_buf.extend_from_slice(&chunk);
+                    }
+                }
+            }
+        }
+        Ok((sample_buf, total_size, true))
+    } else {
+        let mut file = File::open(p)?;
+        let total_size = file.metadata()?.len();
+        let mut buf = vec![0u8; max_bytes.min(total_size as usize)];
+        let n = file.read(&mut buf)?;
+        buf.truncate(n);
+        Ok((buf, total_size, false))
+    }
+}
 
 const PILOT_SAMPLE_SIZE: usize = 16 * 1024;
 
@@ -525,12 +694,36 @@ pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
     output_path: Q,
     level: u32,
 ) -> Result<()> {
+    compress_file_with_progress(input_path, output_path, level, None)
+}
+
+/// Streams superblocks in batches with real-time progress callbacks.
+pub fn compress_file_with_progress<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+    input_path: P,
+    output_path: Q,
+    level: u32,
+    progress: Option<ProgressCallback>,
+) -> Result<()> {
     use std::fs::File;
     use std::io::{BufReader, BufWriter, Read, Write};
     use xxhash_rust::xxh64::Xxh64;
 
-    let mut input_file = BufReader::new(File::open(input_path.as_ref())?);
-    let original_size = input_file.get_ref().metadata()?.len();
+    let target_name = input_path
+        .as_ref()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let (mut input_reader, original_size): (Box<dyn Read>, u64) = if input_path.as_ref().is_dir() {
+        let vfs_reader = crate::vfs::pack::VfsDirectoryReader::open(input_path.as_ref())?;
+        let size = vfs_reader.total_stream_size();
+        (Box::new(vfs_reader), size)
+    } else {
+        let file = File::open(input_path.as_ref())?;
+        let size = file.metadata()?.len();
+        (Box::new(BufReader::new(file)), size)
+    };
 
     let mut output_file = BufWriter::new(File::create(output_path.as_ref())?);
     let mut file_hasher = Xxh64::new(0);
@@ -551,6 +744,7 @@ pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
     let mut block_table: Vec<BlockTableEntry> = Vec::new();
     let mut current_offset = FILE_HEADER_SIZE as u64;
     let mut sb_id = 0u32;
+    let mut bytes_processed = 0u64;
 
     const BATCH_SUPERBLOCKS: usize = 16;
 
@@ -560,7 +754,7 @@ pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
             let mut chunk = vec![0u8; sb_size];
             let mut read_bytes = 0;
             while read_bytes < sb_size {
-                let n = input_file.read(&mut chunk[read_bytes..])?;
+                let n = input_reader.read(&mut chunk[read_bytes..])?;
                 if n == 0 {
                     break;
                 }
@@ -577,6 +771,9 @@ pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
         if batch_chunks.is_empty() {
             break;
         }
+
+        let batch_uncompressed: u64 = batch_chunks.iter().map(|c| c.len() as u64).sum();
+        bytes_processed += batch_uncompressed;
 
         let start_sb_id = sb_id;
         sb_id += batch_chunks.len() as u32;
@@ -623,6 +820,21 @@ pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
                 });
             }
         }
+
+        if let Some(ref cb) = progress {
+            let fraction = if original_size > 0 {
+                (bytes_processed as f32 / original_size as f32).min(1.0)
+            } else {
+                1.0
+            };
+            cb(ProgressUpdate {
+                bytes_processed,
+                total_bytes: original_size,
+                current_target: target_name.clone(),
+                stage: "Compressing",
+                fraction,
+            });
+        }
     }
 
     let block_table_offset = current_offset;
@@ -638,17 +850,44 @@ pub fn compress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
     footer.write_to(&mut output_file)?;
 
     output_file.flush()?;
+
+    if let Some(ref cb) = progress {
+        cb(ProgressUpdate {
+            bytes_processed: original_size,
+            total_bytes: original_size,
+            current_target: target_name,
+            stage: "Complete",
+            fraction: 1.0,
+        });
+    }
+
     Ok(())
 }
 
-/// Decompresses an input .nxs file into an output file with bounded streaming memory.
+/// Decompresses an input .nxs or .nxar file into an output file with bounded streaming memory.
 pub fn decompress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
     input_path: P,
     output_path: Q,
 ) -> Result<()> {
+    decompress_file_with_progress(input_path, output_path, None)
+}
+
+/// Decompresses an input archive with real-time progress callbacks.
+pub fn decompress_file_with_progress<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+    input_path: P,
+    output_path: Q,
+    progress: Option<ProgressCallback>,
+) -> Result<()> {
     use std::fs::File;
     use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
     use xxhash_rust::xxh64::Xxh64;
+
+    let target_name = input_path
+        .as_ref()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     let mut input_file = File::open(input_path.as_ref())?;
     let file_len = input_file.metadata()?.len();
@@ -714,11 +953,44 @@ pub fn decompress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
         }
     }
 
-    // 4. Stream decompress superblock by superblock directly to output file
-    let mut output_file = BufWriter::new(File::create(output_path.as_ref())?);
+    // 4. Stream decompress superblock by superblock directly to output file or VFS unpacker
     let mut total_written: u64 = 0;
-
     const DECOMP_BATCH: usize = 16;
+
+    enum DecompressTarget {
+        File(BufWriter<File>),
+        Vfs(
+            std::sync::mpsc::Sender<Vec<u8>>,
+            std::thread::JoinHandle<Result<()>>,
+        ),
+    }
+
+    struct ChannelReader {
+        receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+        current: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                if self.current.position() < self.current.get_ref().len() as u64 {
+                    let n = self.current.read(buf)?;
+                    if n > 0 {
+                        return Ok(n);
+                    }
+                }
+                match self.receiver.recv() {
+                    Ok(chunk) => {
+                        self.current = std::io::Cursor::new(chunk);
+                    }
+                    Err(_) => return Ok(0),
+                }
+            }
+        }
+    }
+
+    let mut target: Option<DecompressTarget> = None;
+
     for chunk_sb_entries in superblock_entries.chunks(DECOMP_BATCH) {
         let mut batch_data: Vec<Vec<(SubBlockHeader, Vec<u8>)>> =
             Vec::with_capacity(chunk_sb_entries.len());
@@ -756,19 +1028,90 @@ pub fn decompress_file<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
             .collect();
 
         let decompressed_batch = decompressed_batch?;
+
+        if target.is_none() {
+            let is_vfs = decompressed_batch
+                .first()
+                .map(|chunk| crate::vfs::is_vfs_stream(chunk))
+                .unwrap_or(false);
+
+            if is_vfs {
+                let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                let dest_dir = output_path.as_ref().to_path_buf();
+                let handle = std::thread::spawn(move || {
+                    let mut chan_reader = ChannelReader {
+                        receiver: rx,
+                        current: std::io::Cursor::new(Vec::new()),
+                    };
+                    crate::vfs::unpack_vfs_stream(&mut chan_reader, &dest_dir)?;
+                    Ok(())
+                });
+                target = Some(DecompressTarget::Vfs(tx, handle));
+            } else {
+                let out_file = BufWriter::new(File::create(output_path.as_ref())?);
+                target = Some(DecompressTarget::File(out_file));
+            }
+        }
+
         for sb_bytes in decompressed_batch {
-            output_file.write_all(&sb_bytes)?;
-            total_written += sb_bytes.len() as u64;
+            let sb_len = sb_bytes.len() as u64;
+            match target.as_mut().unwrap() {
+                DecompressTarget::File(f) => {
+                    f.write_all(&sb_bytes)?;
+                }
+                DecompressTarget::Vfs(tx, _) => {
+                    tx.send(sb_bytes).map_err(|e| {
+                        NexusError::DataCorruption(format!("VFS unpacker channel error: {}", e))
+                    })?;
+                }
+            }
+            total_written += sb_len;
+        }
+
+        if let Some(ref cb) = progress {
+            let fraction = if header.original_size > 0 {
+                (total_written as f32 / header.original_size as f32).min(1.0)
+            } else {
+                1.0
+            };
+            cb(ProgressUpdate {
+                bytes_processed: total_written,
+                total_bytes: header.original_size,
+                current_target: target_name.clone(),
+                stage: "Extracting",
+                fraction,
+            });
         }
     }
 
-    output_file.flush()?;
+    match target {
+        Some(DecompressTarget::File(mut f)) => {
+            f.flush()?;
+        }
+        Some(DecompressTarget::Vfs(tx, handle)) => {
+            drop(tx);
+            handle
+                .join()
+                .map_err(|_| NexusError::DataCorruption("VFS unpacker thread panicked".into()))??;
+        }
+        None => {}
+    }
 
     if total_written != header.original_size {
         return Err(NexusError::DataCorruption(format!(
             "Total restored size mismatch: header says {}, got {}",
             header.original_size, total_written
         )));
+    }
+
+    if let Some(ref cb) = progress {
+        cb(ProgressUpdate {
+            bytes_processed: header.original_size,
+            total_bytes: header.original_size,
+            current_target: target_name,
+            stage: "Complete",
+            fraction: 1.0,
+        });
     }
 
     Ok(())
@@ -1016,9 +1359,9 @@ mod tests {
     fn test_pipeline_executable_x86() {
         let mut code = Vec::new();
         code.extend_from_slice(b"\x7FELF\x02\x01\x01\x00"); // ELF header to trigger Executable
-        for i in 0..1000 {
+        for i in 0..1000i32 {
             code.push(0xE8); // CALL
-            let rel = (i * 16) as i32;
+            let rel = i * 16;
             code.extend_from_slice(&rel.to_le_bytes());
             code.push(0x90); // NOP
         }
@@ -1095,5 +1438,29 @@ mod tests {
         let compressed = compress(&input, 18).unwrap();
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn test_estimate_compression_text() {
+        let text = b"The quick brown fox jumps over the lazy dog. ".repeat(100);
+        let est_low = estimate_compression(&text, text.len() as u64, 2);
+        let est_med = estimate_compression(&text, text.len() as u64, 6);
+        let est_high = estimate_compression(&text, text.len() as u64, 9);
+        let est_neural = estimate_compression(&text, text.len() as u64, 18);
+
+        assert!(!est_low.is_incompressible);
+        assert!(est_low.savings_percent > 40.0);
+        assert!(est_med.savings_percent >= est_low.savings_percent - 5.0);
+        assert!(est_neural.estimated_bytes <= est_high.estimated_bytes);
+    }
+
+    #[test]
+    fn test_estimate_compression_incompressible() {
+        let mut pseudo_random = vec![0u8; 10000];
+        for (i, b) in pseudo_random.iter_mut().enumerate() {
+            *b = ((i * 101 + 37) % 256) as u8;
+        }
+        let est = estimate_compression(&pseudo_random, pseudo_random.len() as u64, 6);
+        assert!(est.is_incompressible || est.savings_percent < 5.0);
     }
 }

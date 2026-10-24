@@ -1,0 +1,17 @@
+[package]
+name = "nexus-gui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Project NEXUS Contributors"]
+description = "Graphical User Interface for Project NEXUS compression"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "nexus-gui"
+path = "src/main.rs"
+
+[dependencies]
+nexus-core = { path = "../nexus-core" }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }

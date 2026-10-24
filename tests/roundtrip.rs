@@ -141,12 +141,12 @@ fn test_integration_corrupted_end_marker() {
 fn test_integration_executable_binary() {
     let mut exe_data = Vec::new();
     exe_data.extend_from_slice(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xFF\xFF\x00\x00");
-    for i in 0..5000 {
+    for i in 0..5000i32 {
         exe_data.push(0xE8); // CALL
-        let rel = (i * 32) as i32;
+        let rel = i * 32;
         exe_data.extend_from_slice(&rel.to_le_bytes());
         exe_data.push(0xE9); // JMP
-        let rel_jmp = -(i as i32 * 8);
+        let rel_jmp = -(i * 8);
         exe_data.extend_from_slice(&rel_jmp.to_le_bytes());
         exe_data.extend_from_slice(&[0x90, 0x55, 0x89, 0xE5]);
     }
@@ -229,4 +229,67 @@ fn test_integration_neural_level_18_repetitive() {
     let compressed = compress(&input, 18).expect("compression failed");
     let restored = decompress(&compressed).expect("decompression failed");
     assert_eq!(restored, input);
+}
+
+#[test]
+fn test_integration_directory_vfs_roundtrip() {
+    use nexus_core::pipeline::{compress_file, decompress_file};
+    use std::fs::{create_dir_all, read_to_string, remove_dir_all, write};
+
+    let temp_base = std::env::temp_dir().join("nexus_roundtrip_vfs_test");
+    let src_dir = temp_base.join("source");
+    let extracted_dir = temp_base.join("extracted");
+    let archive_path = temp_base.join("test_archive.nxar");
+
+    let _ = remove_dir_all(&temp_base);
+    create_dir_all(src_dir.join("code/src")).unwrap();
+    create_dir_all(src_dir.join("docs")).unwrap();
+
+    write(
+        src_dir.join("code/src/main.rs"),
+        b"fn main() { println!(\"NEXUS-VFS\"); }",
+    )
+    .unwrap();
+    write(
+        src_dir.join("code/src/lib.rs"),
+        b"pub fn add(a: i32, b: i32) -> i32 { a + b }",
+    )
+    .unwrap();
+    write(
+        src_dir.join("docs/README.md"),
+        b"# NEXUS Solid Directory Archive Test",
+    )
+    .unwrap();
+    write(
+        src_dir.join("metadata.json"),
+        b"{\"format\":\"nxar\",\"version\":1}",
+    )
+    .unwrap();
+
+    // 1. Compress directory to .nxar
+    compress_file(&src_dir, &archive_path, 5).expect("directory compression failed");
+    assert!(archive_path.exists());
+
+    // 2. Decompress .nxar directly into extracted directory
+    decompress_file(&archive_path, &extracted_dir).expect("directory decompression failed");
+
+    // 3. Verify all files and contents
+    assert_eq!(
+        read_to_string(extracted_dir.join("code/src/main.rs")).unwrap(),
+        "fn main() { println!(\"NEXUS-VFS\"); }"
+    );
+    assert_eq!(
+        read_to_string(extracted_dir.join("code/src/lib.rs")).unwrap(),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }"
+    );
+    assert_eq!(
+        read_to_string(extracted_dir.join("docs/README.md")).unwrap(),
+        "# NEXUS Solid Directory Archive Test"
+    );
+    assert_eq!(
+        read_to_string(extracted_dir.join("metadata.json")).unwrap(),
+        "{\"format\":\"nxar\",\"version\":1}"
+    );
+
+    let _ = remove_dir_all(&temp_base);
 }

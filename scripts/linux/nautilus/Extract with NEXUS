@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Nautilus / GNOME Files Script: Extract with NEXUS
+# ==============================================================================
+
+set -e
+
+if ! command -v nexus >/dev/null 2>&1; then
+    if [ -f "$HOME/.local/bin/nexus" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+fi
+
+if ! command -v nexus >/dev/null 2>&1; then
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="NEXUS Not Found" --text="nexus executable not found in PATH or ~/.local/bin."
+    else
+        echo "Error: nexus executable not found."
+    fi
+    exit 1
+fi
+
+for archive in "$@"; do
+    if [ -f "$archive" ]; then
+        nexus decompress "$archive"
+    fi
+done
+
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send "NEXUS" "Extraction completed successfully!" -i package-x-generic
+fi

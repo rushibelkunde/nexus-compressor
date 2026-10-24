@@ -1,0 +1,16 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NEXUS Archiver
+Comment=Next-Generation Multi-Strategy Compression Engine
+Exec=nexus-gui %F
+Icon=nexus
+Terminal=false
+Categories=Utility;Archiving;Compression;
+MimeType=application/x-nexus-archive;application/x-nxar;
+StartupNotify=true
+Actions=Compress;
+
+[Desktop Action Compress]
+Name=Compress with NEXUS...
+Exec=nexus-gui compress %F

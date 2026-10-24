@@ -85,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_float_split_f64_array() {
         let values: [f64; 6] = [3.14159, 2.71828, 1.41421, 1.61803, 0.57721, 4.66920];
         let mut input = Vec::new();

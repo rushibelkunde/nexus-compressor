@@ -3,5 +3,6 @@ members = [
     "crates/nexus-core",
     "crates/nexus-cli",
     "crates/nexus-bench",
+    "crates/nexus-gui",
 ]
 resolver = "2"

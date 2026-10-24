@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-nexus-archive">
+    <comment>NEXUS Compressed Archive</comment>
+    <icon name="nexus"/>
+    <glob pattern="*.nxar"/>
+    <glob pattern="*.nxs"/>
+  </mime-type>
+</mime-info>

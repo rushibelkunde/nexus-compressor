@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+    <mime-type type="application/x-nexus-archive">
+        <comment>NEXUS Compressed Archive</comment>
+        <comment xml:lang="en">NEXUS Compressed Archive</comment>
+        <glob pattern="*.nxar"/>
+        <glob pattern="*.nxs"/>
+        <magic priority="60">
+            <match type="string" offset="0" value="NXAR"/>
+            <match type="string" offset="0" value="NXSF"/>
+        </magic>
+        <generic-icon name="package-x-generic"/>
+    </mime-type>
+</mime-info>

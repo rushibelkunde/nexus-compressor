@@ -1,0 +1,44 @@
+Windows Registry Editor Version 5.00
+
+; ==============================================================================
+; NEXUS Context Menu Registry Integration for Windows File Explorer
+; Note: Replace %LOCALAPPDATA% with your actual path if running directly in regedit
+; Or use install.ps1 which dynamically resolves your user path.
+; ==============================================================================
+
+; --- Context menu on ALL FILES -> Compress ---
+[HKEY_CURRENT_USER\Software\Classes\*\shell\NexusCompress]
+@="Compress to .nxar (NEXUS)"
+"Icon"="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\*\shell\NexusCompress\command]
+@="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\" compress \"%1\" --pause"
+
+; --- Context menu on FOLDERS -> Compress ---
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\NexusCompress]
+@="Compress to .nxar (NEXUS)"
+"Icon"="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\NexusCompress\command]
+@="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\" compress \"%1\" --pause"
+
+; --- Context menu on .nxar FILES -> Extract ---
+[HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.nxar\shell\NexusExtractHere]
+@="Extract with NEXUS"
+"Icon"="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.nxar\shell\NexusExtractHere\command]
+@="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\" decompress \"%1\" --pause"
+
+; --- File association for .nxar ---
+[HKEY_CURRENT_USER\Software\Classes\.nxar]
+@="Nexus.Archive"
+
+[HKEY_CURRENT_USER\Software\Classes\Nexus.Archive]
+@="NEXUS Compressed Archive"
+
+[HKEY_CURRENT_USER\Software\Classes\Nexus.Archive\DefaultIcon]
+@="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\Nexus.Archive\shell\open\command]
+@="\"%LOCALAPPDATA%\\Programs\\NEXUS\\nexus.exe\" decompress \"%1\" --pause"

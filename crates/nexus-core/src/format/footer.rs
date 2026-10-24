@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_invalid_end_marker() {
-        let mut buffer = vec![0u8; 24];
+        let mut buffer = [0u8; 24];
         buffer[20..24].copy_from_slice(b"FAIL");
         let err = Footer::read_from(&buffer[..]).unwrap_err();
         match err {

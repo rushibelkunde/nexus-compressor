@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_invalid_magic() {
-        let mut buffer = vec![0u8; 32];
+        let mut buffer = [0u8; 32];
         buffer[0..4].copy_from_slice(b"BAD!");
         let err = FileHeader::read_from(&buffer[..]).unwrap_err();
         match err {
