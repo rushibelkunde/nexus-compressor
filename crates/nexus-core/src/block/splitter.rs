@@ -1,6 +1,7 @@
 //! Framing and block splitting logic (Layer 0).
 
-use crate::block::detector::compute_shannon_entropy;
+use crate::block::detector::entropy_from_histogram;
+use crate::entropy::rans4::histogram;
 
 /// Default superblock size in bytes (1 MB).
 pub const DEFAULT_SUPERBLOCK_SIZE: usize = 1024 * 1024;
@@ -28,61 +29,105 @@ pub struct Superblock {
     pub sub_blocks: Vec<SubBlock>,
 }
 
-/// Dynamically splits a superblock into sub-blocks (16 KB - 512 KB) at entropy transition boundaries.
-pub fn split_superblock_into_subblocks(data: &[u8]) -> Vec<SubBlock> {
-    if data.is_empty() {
-        return vec![SubBlock { data: Vec::new() }];
-    }
+/// A planned sub-block: its byte range within the superblock and the byte
+/// histogram of that range (collected for free while looking for boundaries).
+#[derive(Debug, Clone)]
+pub struct SubBlockPlan {
+    /// Byte range within the superblock.
+    pub range: std::ops::Range<usize>,
+    /// Occurrence count of every byte value in `range`.
+    pub hist: [u32; 256],
+}
 
-    if data.len() <= MIN_SUBBLOCK_SIZE {
-        return vec![SubBlock {
-            data: data.to_vec(),
+/// Plans the sub-blocks (16 KB - 512 KB) of a superblock, cutting at entropy
+/// transitions, in a single pass over the data and without copying it.
+///
+/// The returned ranges are contiguous and cover `data` exactly (an empty
+/// input yields one empty plan).
+pub fn plan_subblocks(data: &[u8]) -> Vec<SubBlockPlan> {
+    plan_subblocks_with_target(data, DEFAULT_TARGET_SUBBLOCK_SIZE)
+}
+
+/// Like [`plan_subblocks`], with an explicit target sub-block size: blocks
+/// are cut at mild entropy changes once they reach `target`, and
+/// unconditionally 64 KB later (never beyond [`MAX_SUBBLOCK_SIZE`]).
+pub fn plan_subblocks_with_target(data: &[u8], target: usize) -> Vec<SubBlockPlan> {
+    let target = target.clamp(MIN_SUBBLOCK_SIZE, MAX_SUBBLOCK_SIZE);
+    let n = data.len();
+    if n <= MIN_SUBBLOCK_SIZE {
+        return vec![SubBlockPlan {
+            range: 0..n,
+            hist: histogram(data),
         }];
     }
 
-    let mut sub_blocks = Vec::new();
-    let mut start = 0;
-    let mut curr = MIN_SUBBLOCK_SIZE;
+    let mut plans: Vec<SubBlockPlan> = Vec::new();
+    let mut start = 0usize;
+    let mut block_hist = [0u32; 256];
+    let mut prev_entropy = 0.0f64;
 
-    let initial_sample_len = std::cmp::min(ENTROPY_STEP_SIZE, data.len());
-    let mut last_window_entropy = compute_shannon_entropy(&data[..initial_sample_len]);
+    let mut offset = 0usize;
+    while offset < n {
+        let window_end = (offset + ENTROPY_STEP_SIZE).min(n);
+        let window_hist = histogram(&data[offset..window_end]);
+        let full_window = window_end - offset == ENTROPY_STEP_SIZE;
+        let entropy = entropy_from_histogram(&window_hist, window_end - offset);
 
-    while curr + ENTROPY_STEP_SIZE <= data.len() {
-        let block_len = curr - start;
-        let window = &data[curr..curr + ENTROPY_STEP_SIZE];
-        let cur_entropy = compute_shannon_entropy(window);
-        let entropy_diff = (cur_entropy - last_window_entropy).abs();
-
-        let should_split = block_len >= MAX_SUBBLOCK_SIZE
-            || (block_len >= MIN_SUBBLOCK_SIZE && entropy_diff >= ENTROPY_CHANGE_THRESHOLD)
-            || (block_len >= DEFAULT_TARGET_SUBBLOCK_SIZE && entropy_diff >= 0.25)
-            || (block_len >= DEFAULT_TARGET_SUBBLOCK_SIZE + (64 * 1024));
-
-        if should_split {
-            sub_blocks.push(SubBlock {
-                data: data[start..curr].to_vec(),
-            });
-            start = curr;
-            last_window_entropy = cur_entropy;
-            curr = start + MIN_SUBBLOCK_SIZE;
-        } else {
-            last_window_entropy = cur_entropy;
-            curr += ENTROPY_STEP_SIZE;
+        let block_len = offset - start;
+        if full_window && block_len >= MIN_SUBBLOCK_SIZE {
+            let entropy_diff = (entropy - prev_entropy).abs();
+            let should_split = block_len >= MAX_SUBBLOCK_SIZE
+                || entropy_diff >= ENTROPY_CHANGE_THRESHOLD
+                || (block_len >= target && entropy_diff >= 0.25)
+                || block_len >= target + (64 * 1024);
+            if should_split {
+                plans.push(SubBlockPlan {
+                    range: start..offset,
+                    hist: block_hist,
+                });
+                start = offset;
+                block_hist = [0u32; 256];
+            }
         }
+
+        for (acc, &c) in block_hist.iter_mut().zip(&window_hist) {
+            *acc += c;
+        }
+        prev_entropy = entropy;
+        offset = window_end;
     }
 
-    if start < data.len() {
-        let tail = &data[start..];
-        if tail.len() < MIN_SUBBLOCK_SIZE && !sub_blocks.is_empty() {
-            sub_blocks.last_mut().unwrap().data.extend_from_slice(tail);
-        } else {
-            sub_blocks.push(SubBlock {
-                data: tail.to_vec(),
-            });
+    // A short tail joins the previous sub-block instead of standing alone.
+    match plans.last_mut() {
+        Some(last) if n - start < MIN_SUBBLOCK_SIZE => {
+            last.range.end = n;
+            for (acc, &c) in last.hist.iter_mut().zip(&block_hist) {
+                *acc += c;
+            }
         }
+        _ => plans.push(SubBlockPlan {
+            range: start..n,
+            hist: block_hist,
+        }),
     }
 
-    sub_blocks
+    plans
+}
+
+/// Computes sub-block boundaries (16 KB - 512 KB) for a superblock.
+/// See [`plan_subblocks`].
+pub fn split_subblock_ranges(data: &[u8]) -> Vec<std::ops::Range<usize>> {
+    plan_subblocks(data).into_iter().map(|p| p.range).collect()
+}
+
+/// Dynamically splits a superblock into sub-blocks (16 KB - 512 KB) at entropy transition boundaries.
+pub fn split_superblock_into_subblocks(data: &[u8]) -> Vec<SubBlock> {
+    split_subblock_ranges(data)
+        .into_iter()
+        .map(|r| SubBlock {
+            data: data[r].to_vec(),
+        })
+        .collect()
 }
 
 /// Splits a raw byte stream into superblocks of at most `superblock_size` bytes.

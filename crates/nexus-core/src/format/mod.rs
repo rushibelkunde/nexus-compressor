@@ -54,9 +54,11 @@ impl BlockType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CompressionPath {
-    /// Path A: LZ77 + rANS (or Huffman in Phase 1)
+    /// Path A (legacy, format v1): byte-tagged LZ77 tokens + order-0 rANS.
+    /// Still decoded, no longer written.
     PathA = 0,
-    /// Path B: BWT + MTF + RLE + rANS
+    /// Path B (legacy, format v1): BWT + MTF + RLE + order-0 rANS.
+    /// Still decoded, no longer written.
     PathB = 1,
     /// Path C: Context Mixing + Arithmetic Coding
     PathC = 2,
@@ -64,7 +66,16 @@ pub enum CompressionPath {
     PathD = 3,
     /// Path E: Store (uncompressed fallback)
     PathE = 4,
+    /// Path A2 (format v2): sequence LZ with repeat offsets and split
+    /// interleaved-rANS streams. See `compress::lz`.
+    PathA2 = 5,
+    /// Path B2 (format v2): BWT over suffix order with adaptive bit-level
+    /// modelling and a 16-bit range coder. See `compress::bwt_cm`.
+    PathB2 = 6,
 }
+
+/// Number of distinct [`CompressionPath`] values.
+pub const PATH_COUNT: usize = 7;
 
 impl CompressionPath {
     /// Converts a byte into a CompressionPath enum variant.
@@ -75,6 +86,8 @@ impl CompressionPath {
             2 => Ok(Self::PathC),
             3 => Ok(Self::PathD),
             4 => Ok(Self::PathE),
+            5 => Ok(Self::PathA2),
+            6 => Ok(Self::PathB2),
             other => Err(NexusError::UnsupportedPath(other)),
         }
     }
@@ -98,6 +111,8 @@ impl PreprocessFlags {
     pub const FLOAT_SPLIT: Self = Self(1 << 4);
     pub const WRT: Self = Self(1 << 5);
     pub const COL_TRANSPOSE: Self = Self(1 << 6);
+    /// E8/E9 branch filter v2 (near branches only, superblock-relative).
+    pub const X86_E8E9: Self = Self(1 << 7);
 
     pub fn empty() -> Self {
         Self(0)

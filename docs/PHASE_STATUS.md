@@ -5,15 +5,81 @@
 
 ---
 
-## Current Status: **Production Ready (All Phases 1–6 Completed)**
+## Current Status: **Phase 7 in progress — codec rebuild (format v2)**
 
-### Phase 6 Checklist
+Phases 1-6 produced a working container, CLI and GUI, but their "production
+ready" verdict was based on a benchmark of 32 KB of synthetic repeated text.
+Measured on real files, every v1 level was larger than `gzip -6` and the
+context-mixing and neural levels were larger than level 2. Phase 7 replaces
+the codecs and measures everything against real reference compressors.
 
-- [x] CLI enhancements (verbose compression stats per block, `nexus list` archive inspection, `--threads` flag)
-- [x] Memory-bounded streaming for massive multi-gigabyte files (parallel superblocks)
-- [x] Comprehensive benchmark suite in `nexus-bench` against heterogeneous datasets (text, code, floats, audio, json, random)
-- [x] Performance profiling and inner-loop optimization
-- [x] 100% bit-exact lossless roundtrip verification across all algorithms
+### Phase 7 Checklist
+
+- [x] Corpus benchmark harness with reference compressors and a size regression gate (`nexus-bench`, `scripts/bench/`)
+- [x] Release profile (LTO, single codegen unit); one buffer per superblock; single-pass block analysis; single-read decompression
+- [x] LZ-ANS v2 (Path A2) for levels 1-12: split streams, repeat offsets, interleaved rANS, five match finders, optimal parsing, context-coded literals
+- [x] BWT + adaptive model (Path B2) for levels 13+, with linear-time suffix array construction
+- [x] Bijective E8/E9 branch filter v2 applied to every block that looks like x86 code
+- [x] Format v2 with full v1 read compatibility (verified against archives written by the v0.1.0 release binary)
+- [x] Cancellation, verify-only pass (`nexus test`), write-to-temp-then-rename, no partial outputs left behind
+- [x] GUI rework: drag and drop, live compression view, block map, level rail with measured estimates, archive test
+- [ ] GUI visual review on a real display (it has only been verified by build, lint and off-screen layout tests)
+- [ ] Context-mixing rebuild (Paths C/D are unchanged from v1 and rarely win a block)
+- [ ] Mid-level speed: levels 1-9 are 2.5-3x slower than zstd at the same ratio
+- [ ] Decompression speed: about 3-4x slower than zstd at levels 1-12; BWT blocks are much slower still
+
+### Measured results (Silesia corpus, 211,938,580 bytes, single thread)
+
+Sizes are exact and reproducible. Speeds come from a shared, thermally
+limited 4-core laptop where the same run varies by 30-50%, so compare the
+speed columns only within one table.
+
+| Compressor | Bytes | Ratio |
+|------------|------:|------:|
+| nexus -1  | 73,343,688 | 34.61% |
+| nexus -3  | 67,261,061 | 31.74% |
+| nexus -6  | 60,556,918 | 28.57% |
+| nexus -9  | 57,152,757 | 26.97% |
+| nexus -11 | 53,843,164 | 25.41% |
+| nexus -12 | 53,447,605 | 25.22% |
+| nexus -13 | 49,778,677 | 23.49% |
+| zstd -1   | 73,411,400 | 34.64% |
+| zstd -3   | 66,512,901 | 31.38% |
+| zstd -9   | 59,371,345 | 28.01% |
+| zstd -19  | 52,924,791 | 24.97% |
+| gzip -6   | 68,227,965 | 32.19% |
+| brotli -5 | 59,590,609 | 28.12% |
+| brotli -11| 49,564,563 | 23.39% |
+| bzip2 -9  | 54,506,769 | 25.72% |
+| xz -9     | 48,795,480 | 23.02% |
+
+Speed, one run with everything measured back to back (MB/s compress / decompress):
+
+| Compressor | Compress | Decompress |
+|------------|---------:|-----------:|
+| nexus -1 | 57 | 99 |
+| nexus -3 | 43 | 102 |
+| nexus -6 | 6.6 | 119 |
+| zstd -1  | 141 | 403 |
+| zstd -3  | 74 | 345 |
+| zstd -9  | 15.6 | 297 |
+
+What this says:
+
+* **Size**: levels 1-12 are within about 1% of zstd at the matching level.
+  Level 13 is smaller than `zstd -19` and `bzip2 -9`, equal to `brotli -11`,
+  and 2% larger than `xz -9`. On text alone level 13 beats `xz -9`
+  (`dickens`: 2,676,326 vs 2,830,604 bytes).
+* **Speed**: NEXUS is 2.5-3x slower than zstd to compress and 3-4x slower to
+  decompress at equal size. Level 13 decompresses BWT-coded blocks at only a
+  few MB/s per thread.
+* Before and after on the two files first used to evaluate v1 (a 6 MB
+  source-code file and a 14.5 MB executable, 20.5 MB together): level 6 went
+  from 7,965,328 to 5,431,001 bytes, and level 13 reaches 4,851,062. For
+  reference `gzip -6` gives 6,409,780 and `xz -6` gives 4,703,964.
+
+Regenerate with `target/release/nexus-bench --threads 1 --refs`; gate changes
+with `--check scripts/bench/baseline-silesia.tsv`.
 
 ---
 
@@ -23,10 +89,11 @@
 |-------|------|--------|-------------|
 | 1 | Foundation | ✅ Completed | ≈ gzip |
 | 2 | Core Optimizations | ✅ Completed | > gzip, ≈ bzip2 |
-| 3 | Adaptive Intelligence | ✅ Completed | > 7-Zip, ≈ Zstd |
-| 4 | Context Mixing | ✅ Completed | > 7-Zip Ultra |
-| 5 | Neural Compression | ✅ Completed | ≈ cmix |
+| 3 | Adaptive Intelligence | ✅ Completed | > 7-Zip, ≈ Zstd (not met; see Phase 7) |
+| 4 | Context Mixing | ✅ Completed | > 7-Zip Ultra (not met; see Phase 7) |
+| 5 | Neural Compression | ✅ Completed | ≈ cmix (not met; see Phase 7) |
 | 6 | Polish & Performance | ✅ Completed | Production ready |
+| 7 | Codec rebuild (format v2) | 🚧 In progress | zstd-class at 1-12, > xz at 13+ |
 
 ---
 

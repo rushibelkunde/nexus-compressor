@@ -1,0 +1,17 @@
+# NEXUS format v2 baseline on the Silesia corpus (211,938,580 bytes), 1 thread.
+# Sizes are deterministic and are what `--check` gates on. Speeds are from a
+# shared, thermally limited 4-core laptop and are indicative only.
+# level	bytes	comp_mbs	decomp_mbs
+1	73343688	105.2	185.6
+2	71497878	101.8	207.4
+3	67261061	85.2	209.1
+4	66287994	50.5	130.4
+5	61466440	23.6	270.2
+6	60556918	14.5	261.3
+7	60192070	9.9	186.4
+8	57891679	2.8	179.2
+9	57152757	1.1	181.0
+10	55586616	2.3	161.6
+11	53843164	1.1	119.3
+12	53447605	0.9	156.6
+13	49778677	1.0	9.9

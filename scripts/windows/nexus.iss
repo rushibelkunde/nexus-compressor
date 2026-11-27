@@ -5,7 +5,7 @@
 ; ==============================================================================
 
 #define MyAppName "NEXUS Archiver"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "NEXUS Core Team"
 #define MyAppURL "https://github.com/nexus-archiver/nexus"
 #define MyAppExeName "nexus-gui.exe"

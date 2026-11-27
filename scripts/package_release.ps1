@@ -2,13 +2,13 @@
 # NEXUS Release Packager
 # Builds optimized release binaries and creates a portable 1-click distribution
 # Creates:
-#   dist\NEXUS-v0.1.0-Windows-x64\
-#   dist\NEXUS-v0.1.0-Windows-x64.zip
+#   dist\NEXUS-v0.2.0-Windows-x64\
+#   dist\NEXUS-v0.2.0-Windows-x64.zip
 # ==============================================================================
 
 [CmdletBinding()]
 param(
-    [string]$Version = "0.1.0"
+    [string]$Version = "0.2.0"
 )
 
 $ErrorActionPreference = "Stop"

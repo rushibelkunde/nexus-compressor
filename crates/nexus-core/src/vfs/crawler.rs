@@ -162,10 +162,7 @@ mod tests {
             .map(|e| e.path.as_str())
             .collect();
 
-        assert_eq!(
-            file_paths,
-            vec!["a.rs", "subdir/c.rs", "a.txt", "b.txt"]
-        );
+        assert_eq!(file_paths, vec!["a.rs", "subdir/c.rs", "a.txt", "b.txt"]);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

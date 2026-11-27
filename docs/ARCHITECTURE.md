@@ -207,28 +207,43 @@ two results). A 16KB pilot sample provides >95% accurate path prediction at <1% 
 
 ---
 
-## 4. Compression Path Decision Matrix
+## 4. Compression Path Decision Matrix (format v2)
 
-| BlockType | Level 1-6 | Level 7-12 | Level 13-16 | Level 17-19 |
-|-----------|-----------|------------|-------------|-------------|
-| Text | PATH_B | PATH_B (pilot vs A) | PATH_C | PATH_D |
-| SourceCode | PATH_B | PATH_B (pilot vs A) | PATH_C | PATH_D |
-| StructuredData | PATH_A | pilot A vs B | PATH_C | PATH_D |
-| Binary | PATH_A | PATH_A | PATH_C | PATH_D |
-| Executable | PATH_A | PATH_A | PATH_C | PATH_D |
-| FloatingPoint | PATH_A | PATH_A | PATH_C | PATH_D |
-| Audio | PATH_A | pilot A vs B | PATH_C | PATH_D |
-| Image | PATH_A | PATH_A | PATH_C | PATH_D |
-| Incompressible | PATH_E | PATH_E | PATH_E | PATH_E |
+Every non-incompressible sub-block is coded with LZ-ANS v2 (PATH_A2). Higher
+levels additionally try modelling paths on the same block and keep whichever
+payload is smallest, so a higher level never produces a larger block.
+
+| Level | LZ strategy (PATH_A2) | Superblock | Also tried per block |
+|-------|-----------------------|-----------:|----------------------|
+| 1-2   | single hash probe, greedy | 2 MB | - |
+| 3-4   | two hash probes (8-byte + short), greedy | 4 MB | - |
+| 5-7   | tagged hash rows (16 candidates), lazy | 8 MB | - |
+| 8-9   | hash chains, lazy | 16 MB | - |
+| 10-12 | binary-tree match finder, price-based optimal parse | 16 MB | - |
+| 13-15 | as level 12 | 16 MB | PATH_B2 (BWT + adaptive model) |
+| 16    | as level 12 | 16 MB | PATH_B2, PATH_C |
+| 17-19 | as level 12 | 16 MB | PATH_B2, PATH_D |
+
+Levels 7 and above code literals with context-clustered tables when that is
+estimated to be smaller. Blocks detected as incompressible are stored
+(PATH_E) at every level; so is any block whose best payload is not smaller
+than the block itself.
+
+Preprocessing is chosen per sub-block from its detected type: the E8/E9
+branch filter for binary blocks that contain enough near CALL instructions,
+byte-plane splitting for float arrays, delta coding for PCM audio.
 
 ---
 
-## 5. Performance Targets
+## 5. Performance
 
-| Operation | Target | Measured Against |
-|-----------|--------|-----------------|
-| Compress (level 1-3) | > 200 MB/s | gzip -1 |
-| Compress (level 4-6) | > 50 MB/s | gzip -9 |
-| Compress (level 7-12) | > 10 MB/s | 7z ultra |
-| Decompress (all levels) | > 300 MB/s | zstd decompress |
-| Ratio (level 7-12) | Better than 7z | Silesia corpus |
+Targets are stated against a named rival at each level band, and are checked
+by `nexus-bench` on the Silesia corpus (see `scripts/bench/README.md`).
+Current measurements live in `docs/PHASE_STATUS.md`; this table is the goal.
+
+| Levels | Rival | Goal |
+|--------|-------|------|
+| 1-4    | zstd -1 .. -3 | equal ratio at comparable speed |
+| 5-9    | zstd -9 .. -19, brotli 5 .. 9 | equal ratio at comparable speed |
+| 10-12  | xz -9 | smaller output, several times faster to decompress |
+| 13-19  | xz -9, bzip2 -9 | clearly smaller output; speed secondary |

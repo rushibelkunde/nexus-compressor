@@ -483,3 +483,25 @@ Output: [Plane 0] [Plane 1] [Plane 2] [Plane 3]
 In arrays of similar-magnitude floats, Plane 0 (exponent bytes) will be nearly
 identical across all values, compressing to almost nothing. This is much better
 than compressing the interleaved float bytes where each byte seems "random".
+
+---
+
+## Format v2 Codecs (current)
+
+Sections 2-7 above describe the original (format v1) Path A and Path B. They
+are still decoded but no longer written. The codecs written today are
+documented next to their code and, at the byte level, in
+`docs/FORMAT_SPEC.md` section 10:
+
+| Codec | Module | Summary |
+|-------|--------|---------|
+| LZ-ANS v2 (Path A2) | `compress/lz/` | Sequences `(literal length, match length, offset)` with three repeat offsets; literals, length codes and offset codes in separate streams. Match finders by level: single hash probe, double hash, tagged hash rows, hash chains, binary tree. Levels 10+ use a forward dynamic-programming parse priced from the previous block's symbol statistics. |
+| Interleaved rANS | `entropy/rans4.rs` | Eight rANS states over one 16-bit word stream, 12-bit static frequencies, reciprocal-multiply encoder, branch-free renormalisation. |
+| Context-coded literals | `entropy/ctx_rans.rs` | The 256 previous-byte contexts are clustered into at most 16 classes (seed with the busiest, refine k-means style, merge while a table header costs more than it saves); each class has its own rANS table. |
+| BWT + adaptive model (Path B2) | `compress/bwt_cm.rs`, `compress/sais.rs` | Suffix array by induced sorting (linear time), then the transformed bytes are coded bit by bit with three shift-updated predictors, a secondary estimation stage keyed on run state, and a 16-bit binary range coder. |
+| E8/E9 branch filter v2 | `preprocess/x86.rs` | Near CALL/JMP operands become absolute targets with wrap-around inside 25 bits, which keeps the transform bijective for every input. |
+
+Everything that influences decoding is integer arithmetic. Floating point
+appears only in encoder-side heuristics (block type detection, sub-block
+splitting), which choose among valid encodings and cannot desynchronise a
+decoder.

@@ -92,11 +92,12 @@ fn test_integration_large_streaming_stream() {
     assert_eq!(restored, input);
 
     let info = inspect_archive(&compressed).expect("inspect failed");
-    assert!(
-        info.superblock_count >= 5,
-        "Expected >= 5 superblocks, got {}",
-        info.superblock_count
-    );
+    // The stream must span several independent superblocks at this level.
+    let expected = input
+        .len()
+        .div_ceil(nexus_core::compress::lz::superblock_size_for_level(1));
+    assert!(expected >= 3, "test input should cover several superblocks");
+    assert_eq!(info.superblock_count as usize, expected);
 }
 
 #[test]
@@ -292,4 +293,124 @@ fn test_integration_directory_vfs_roundtrip() {
     );
 
     let _ = remove_dir_all(&temp_base);
+}
+
+#[test]
+fn test_integration_verify_and_cancel_file_api() {
+    use nexus_core::pipeline::{
+        compress_file_with_control, decompress_file, verify_file_with_control, JobControl,
+    };
+    use nexus_core::NexusError;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let dir = std::env::temp_dir().join(format!("nexus-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input_path = dir.join("input.bin");
+    let archive_path = dir.join("input.nxar");
+    let restored_path = dir.join("restored.bin");
+
+    let mut input = Vec::new();
+    let mut state: u64 = 42;
+    while input.len() < 5_000_000 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let word = format!(
+            "record-{} value-{}\n",
+            (state >> 40) % 5000,
+            (state >> 20) % 97
+        );
+        input.extend_from_slice(word.as_bytes());
+    }
+    std::fs::write(&input_path, &input).unwrap();
+
+    // Normal run, then verify without extracting, then extract and compare.
+    compress_file_with_control(&input_path, &archive_path, 3, &JobControl::default()).unwrap();
+    let verified = verify_file_with_control(&archive_path, &JobControl::default()).unwrap();
+    assert_eq!(verified, input.len() as u64);
+    decompress_file(&archive_path, &restored_path).unwrap();
+    assert_eq!(std::fs::read(&restored_path).unwrap(), input);
+
+    // Verification must notice a flipped payload byte.
+    let mut damaged = std::fs::read(&archive_path).unwrap();
+    let mid = damaged.len() / 2;
+    damaged[mid] ^= 0x10;
+    let damaged_path = dir.join("damaged.nxar");
+    std::fs::write(&damaged_path, &damaged).unwrap();
+    assert!(verify_file_with_control(&damaged_path, &JobControl::default()).is_err());
+
+    // A pre-set cancel flag aborts and leaves no partial archive behind.
+    let cancelled_path = dir.join("cancelled.nxar");
+    let control = JobControl {
+        progress: None,
+        cancel: Some(Arc::new(AtomicBool::new(true))),
+    };
+    let result = compress_file_with_control(&input_path, &cancelled_path, 3, &control);
+    assert!(matches!(result, Err(NexusError::Cancelled)));
+    assert!(!cancelled_path.exists());
+
+    // Cancelling an overwrite must leave the existing archive untouched and
+    // no temporary file behind.
+    let before = std::fs::read(&archive_path).unwrap();
+    let result = compress_file_with_control(&input_path, &archive_path, 3, &control);
+    assert!(matches!(result, Err(NexusError::Cancelled)));
+    assert_eq!(std::fs::read(&archive_path).unwrap(), before);
+    assert!(!dir.join("input.nxar.part").exists());
+
+    // Extracting a corrupt archive must not leave a partial output file, and
+    // an invalid archive must not touch a file already at the destination.
+    let partial_out = dir.join("partial.bin");
+    assert!(decompress_file(&damaged_path, &partial_out).is_err());
+    assert!(!partial_out.exists());
+    let precious = dir.join("precious.bin");
+    std::fs::write(&precious, b"keep me").unwrap();
+    let not_an_archive = dir.join("garbage.nxar");
+    std::fs::write(&not_an_archive, vec![0x55u8; 4096]).unwrap();
+    assert!(decompress_file(&not_an_archive, &precious).is_err());
+    assert_eq!(std::fs::read(&precious).unwrap(), b"keep me");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_integration_level_13_uses_bwt_for_text_and_is_smaller() {
+    use nexus_core::format::CompressionPath;
+
+    let words: [&[u8]; 12] = [
+        b"compression ",
+        b"entropy ",
+        b"window ",
+        b"the ",
+        b"of ",
+        b"and ",
+        b"match ",
+        b"literal ",
+        b"suffix ",
+        b"array ",
+        b"model ",
+        b"context.\n",
+    ];
+    let mut state: u64 = 7;
+    let mut input = Vec::new();
+    while input.len() < 1_500_000 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        input.extend_from_slice(words[((state >> 33) % 12) as usize]);
+    }
+
+    let lz_only = compress(&input, 12).expect("level 12 failed");
+    let with_bwt = compress(&input, 13).expect("level 13 failed");
+    assert_eq!(decompress(&with_bwt).expect("decode failed"), input);
+    assert!(
+        with_bwt.len() < lz_only.len(),
+        "level 13 ({}) should beat level 12 ({}) on text",
+        with_bwt.len(),
+        lz_only.len()
+    );
+
+    let info = inspect_archive(&with_bwt).expect("inspect failed");
+    assert!(info
+        .blocks
+        .iter()
+        .any(|b| b.compression_path == CompressionPath::PathB2));
 }

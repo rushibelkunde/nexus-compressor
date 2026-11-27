@@ -22,12 +22,13 @@
 
 - **🧠 Adaptive Chameleon Engine**: Dynamically classifies content (Text, x86 Machine Code, IEEE 754 Floats, Audio PCM, High-Entropy Binary) and routes it to 5 specialized compression paths.
 - **⚡ Intuitive Presets & 1–19 Custom Levels**:
-  - **Low (Level 2)**: High-speed everyday backups (~120–250 MB/s).
-  - **Medium (Level 6)**: Balanced default with dynamic boundary splitting (~30–80 MB/s).
-  - **High (Level 9)**: Maximum space savings with deep LZ77 and BWT/MTF/Zero-RLE (~15–30 MB/s).
-  - **Custom (Levels 13–16)**: Bit-level Context Mixing with 5 predictive context models and neural logistic mixing.
-  - **Custom (Levels 17–19)**: Online integer SGD Neural Network bit prediction.
-- **📊 Instant Pre-Flight Size Estimator**: Analyzes sample entropy in `<1 millisecond` to show accurate predicted archive size and space savings *before* you compress.
+  - **Low (Level 2)**: single-probe LZ, the fastest setting.
+  - **Medium (Level 6)**: lazy LZ over an 8 MB window, the general-purpose default.
+  - **High (Level 11)**: optimal-parse LZ over a 16 MB window, still quick to decompress.
+  - **Custom (Levels 13–15)**: additionally tries block-sorting (BWT) with an adaptive model on every block and keeps whichever is smaller. Smallest output, slow to decompress.
+  - **Custom (Levels 16–19)**: additionally try the experimental context-mixing and neural models (very slow, rarely smaller).
+  - Measured sizes and speeds against zstd, brotli, bzip2 and xz are in [docs/PHASE_STATUS.md](docs/PHASE_STATUS.md).
+- **📊 Pre-Flight Size Estimator**: Trial-compresses a sample with the real codec at the chosen level to predict archive size and space savings *before* you compress.
 - **📁 Similarity-Clustered VFS**: Groups related and similar files together before compression, unlocking massive cross-file redundancy that standard ZIP and tar miss.
 - **🖥️ Zero-Terminal Native GUI**: Built with `egui` (`#![windows_subsystem = "windows"]`) showing live animated progress, MB/s speed, ETA, and Explorer integration.
 - **🔒 100% Deterministic Fixed-Point Math**: Zero floating-point drift ensures bit-exact decompression across Intel, AMD, and ARM processors.
@@ -123,7 +124,7 @@ Layer 4: CONTAINER     — Modern .nxar container format with footer block table
 git clone https://github.com/rushibelkunde/nexus-compressor.git
 cd nexus-compressor
 
-# Run all 130 unit and integration tests
+# Run all unit and integration tests
 cargo test
 
 # Build optimized release binaries

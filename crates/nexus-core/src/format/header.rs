@@ -7,8 +7,14 @@ use std::io::{Read, Write};
 /// Magic bytes for the .nxs container: "NXS\x01".
 pub const MAGIC_BYTES: [u8; 4] = [0x4E, 0x58, 0x53, 0x01];
 
-/// The current supported format version.
-pub const CURRENT_FORMAT_VERSION: u16 = 1;
+/// The format version written by this build.
+///
+/// * v1 - Paths A/B/C/D/E.
+/// * v2 - adds Path A2 (LZ-ANS v2) and Path B2 (BWT with adaptive
+///   modelling); stored blocks may carry preprocess flags.
+///
+/// Readers accept every version up to this one.
+pub const CURRENT_FORMAT_VERSION: u16 = 2;
 
 /// Fixed size of the file header in bytes.
 pub const FILE_HEADER_SIZE: usize = 32;
@@ -16,7 +22,7 @@ pub const FILE_HEADER_SIZE: usize = 32;
 /// File header for .nxs binary format (32 bytes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHeader {
-    /// Format version (currently 1).
+    /// Format version (see [`CURRENT_FORMAT_VERSION`]).
     pub format_version: u16,
     /// Bitfield flags (e.g., bit 0: encryption, bit 1: xxhash64).
     pub flags: u16,

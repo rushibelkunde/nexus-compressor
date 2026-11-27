@@ -31,6 +31,9 @@ pub enum NexusError {
 
     #[error("Data corruption: {0}")]
     DataCorruption(String),
+
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 /// Convenience alias for results within NEXUS.

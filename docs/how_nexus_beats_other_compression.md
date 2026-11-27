@@ -2,6 +2,13 @@
 
 > **A Plain-Language Guide to the Architecture, Breakthroughs, and Why NEXUS Outperforms ZIP, 7-Zip, RAR, and Zstandard.**
 
+> **Accuracy note.** This guide was written before NEXUS was benchmarked on
+> real files, and its performance claims are not supported by measurement.
+> The current, measured comparison with zstd, brotli, bzip2 and xz is in
+> [PHASE_STATUS.md](PHASE_STATUS.md): NEXUS matches zstd's sizes, is smaller
+> than zstd and bzip2 at its top levels, is still slightly larger than xz on
+> mixed data, and is slower than zstd at every level.
+
 ---
 
 ## 1. The 30-Second Elevator Pitch

@@ -15,7 +15,8 @@ pub mod vfs;
 
 pub use error::{NexusError, Result};
 pub use pipeline::{
-    compress, compress_file, compress_file_with_progress, decompress, decompress_file,
-    decompress_file_with_progress, estimate_compression, sample_path, CompressionEstimate,
-    CompressionPreset, ProgressCallback, ProgressUpdate,
+    compress, compress_file, compress_file_with_control, compress_file_with_progress, decompress,
+    decompress_file, decompress_file_with_control, decompress_file_with_progress,
+    estimate_compression, sample_path, verify_file_with_control, CompressionEstimate,
+    CompressionPreset, JobControl, ProgressCallback, ProgressUpdate,
 };

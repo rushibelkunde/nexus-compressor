@@ -17,11 +17,11 @@ use std::time::Instant;
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresetArg {
-    /// Fast mode: Level 2, ~200+ MB/s, lower CPU usage
+    /// Fast mode: level 2, single-probe LZ, highest throughput
     Low,
-    /// Balanced mode: Level 6, default general-purpose compression
+    /// Balanced mode: level 6, lazy LZ, the general-purpose default
     Medium,
-    /// Maximum mode: Level 9, deep LZ match search & maximum space savings
+    /// Maximum mode: level 11, optimal-parse LZ, still fast to decompress
     High,
 }
 
@@ -67,7 +67,9 @@ enum Commands {
         /// Compression preset (low, medium, high - overrides numeric level)
         #[arg(long, value_enum)]
         preset: Option<PresetArg>,
-        /// Compression level (1-19, default: 6 if preset not specified)
+        /// Compression level (default: 6 if preset not specified).
+        /// 1-4 fast LZ, 5-9 lazy LZ, 10-12 optimal LZ, 13-15 add block-sorting
+        /// for text (smallest, slow to decompress), 16-19 experimental models
         #[arg(short, long)]
         level: Option<u32>,
     },
@@ -77,6 +79,11 @@ enum Commands {
         input: PathBuf,
         /// Destination path for restored file or directory (defaults to archive base name)
         output: Option<PathBuf>,
+    },
+    /// Verifies every checksum of an archive without writing any files
+    Test {
+        /// Path to the .nxar archive to verify
+        input: PathBuf,
     },
     /// Inspects archive metadata and block table without decompressing
     List {
@@ -118,7 +125,10 @@ fn main() {
             let metadata = match fs::metadata(&input) {
                 Ok(meta) => meta,
                 Err(err) => {
-                    exit_err(format!("Error reading input path '{}': {}", input.display(), err), cli.pause);
+                    exit_err(
+                        format!("Error reading input path '{}': {}", input.display(), err),
+                        cli.pause,
+                    );
                 }
             };
 
@@ -140,7 +150,10 @@ fn main() {
                 let (manifest, _) = match nexus_core::vfs::crawl_directory(&input) {
                     Ok(m) => m,
                     Err(err) => {
-                        exit_err(format!("Error scanning directory '{}': {}", input.display(), err), cli.pause);
+                        exit_err(
+                            format!("Error scanning directory '{}': {}", input.display(), err),
+                            cli.pause,
+                        );
                     }
                 };
                 eprintln!(
@@ -174,7 +187,9 @@ fn main() {
                 let _ = std::io::stderr().flush();
             });
 
-            if let Err(err) = compress_file_with_progress(&input, &output, effective_level, Some(progress)) {
+            if let Err(err) =
+                compress_file_with_progress(&input, &output, effective_level, Some(progress))
+            {
                 eprintln!();
                 exit_err(format!("Compression failed: {}", err), cli.pause);
             }
@@ -214,7 +229,10 @@ fn main() {
             let compressed_size = match fs::metadata(&input) {
                 Ok(meta) => meta.len(),
                 Err(err) => {
-                    exit_err(format!("Error reading archive '{}': {}", input.display(), err), cli.pause);
+                    exit_err(
+                        format!("Error reading archive '{}': {}", input.display(), err),
+                        cli.pause,
+                    );
                 }
             };
 
@@ -284,10 +302,32 @@ fn main() {
                 elapsed, restored_size, mb_per_sec
             );
         }
+        Commands::Test { input } => {
+            let t_start = Instant::now();
+            match nexus_core::verify_file_with_control(&input, &nexus_core::JobControl::default()) {
+                Ok(original_size) => {
+                    println!(
+                        "OK: '{}' is intact ({} bytes verified in {:.2?})",
+                        input.display(),
+                        original_size,
+                        t_start.elapsed()
+                    );
+                }
+                Err(err) => {
+                    exit_err(
+                        format!("Archive '{}' failed verification: {}", input.display(), err),
+                        cli.pause,
+                    );
+                }
+            }
+        }
         Commands::List { input } => match inspect_archive_file(&input) {
             Ok(info) => print_archive_details(&info, &input),
             Err(err) => {
-                exit_err(format!("Failed to inspect archive '{}': {}", input.display(), err), cli.pause);
+                exit_err(
+                    format!("Failed to inspect archive '{}': {}", input.display(), err),
+                    cli.pause,
+                );
             }
         },
     }

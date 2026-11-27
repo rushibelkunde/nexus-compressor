@@ -219,7 +219,7 @@ try {
     $uninstallRoot = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Software\Microsoft\Windows\CurrentVersion\Uninstall")
     $appUninstall = $uninstallRoot.CreateSubKey("NexusArchiver")
     $appUninstall.SetValue("DisplayName", "NEXUS Archiver")
-    $appUninstall.SetValue("DisplayVersion", "0.1.0")
+    $appUninstall.SetValue("DisplayVersion", "0.2.0")
     $appUninstall.SetValue("Publisher", "NEXUS Core Team")
     $appUninstall.SetValue("DisplayIcon", $destIco)
     $appUninstall.SetValue("InstallLocation", $installDir)
