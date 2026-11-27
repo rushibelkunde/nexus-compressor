@@ -11,6 +11,9 @@ param(
     [string]$Version = "0.2.0"
 )
 
+# Accept both "0.2.0" and a git tag like "v0.2.0" (CI passes the tag name).
+$Version = $Version -replace '^v', ''
+
 $ErrorActionPreference = "Stop"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
